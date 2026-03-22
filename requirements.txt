@@ -1,0 +1,9 @@
+faster-whisper
+vosk
+sounddevice
+pyaudio
+ffmpeg-python
+argostranslate
+nltk
+langdetect
+numpy
