@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from config import AppConfig
+from config import AppConfig, is_vosk_model_dir
 
 
 class RealtimeSTTEngine:
@@ -50,7 +50,26 @@ class RealtimeSTTEngine:
                 f"Vosk model not found at: {model_path}.{extra_hint}"
             )
 
-        model = model_cls(str(model_path))
+        if not is_vosk_model_dir(model_path):
+            nested_hint = ""
+            nested_candidate = model_path / model_path.name
+            if is_vosk_model_dir(nested_candidate):
+                nested_hint = (
+                    f" Detected valid nested model at {nested_candidate}. "
+                    "Update config to this folder or restart after config refresh."
+                )
+            raise FileNotFoundError(
+                "Vosk model directory is invalid or incomplete at "
+                f"{model_path}. Expected files: am/final.mdl and conf/.{nested_hint}"
+            )
+
+        try:
+            model = model_cls(str(model_path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load Vosk model from {model_path}: {exc}. "
+                "Verify the model is fully extracted and not nested twice."
+            )
         self._models[lang] = model
         return model
 

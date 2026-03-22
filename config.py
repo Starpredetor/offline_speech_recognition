@@ -15,13 +15,36 @@ def _pick_first_existing(candidates: list[Path]) -> Path:
     return candidates[0]
 
 
+def is_vosk_model_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "am" / "final.mdl").exists() and (path / "conf").exists()
+
+
+def _unwrap_single_child_dir(path: Path) -> Path:
+    current = path
+    while current.is_dir():
+        children = [child for child in current.iterdir() if child.is_dir()]
+        if len(children) != 1:
+            break
+        if is_vosk_model_dir(current):
+            break
+        current = children[0]
+    return current
+
+
 def _pick_first_vosk_dir(patterns: list[str], fallback: Path) -> Path:
     vosk_dir = MODELS_DIR / "vosk"
+
+    candidates: list[Path] = []
     for pattern in patterns:
-        for path in vosk_dir.glob(pattern):
-            if path.is_dir():
-                return path
-    return fallback
+        candidates.extend([path for path in vosk_dir.glob(pattern) if path.is_dir()])
+
+    for candidate in candidates:
+        normalized = _unwrap_single_child_dir(candidate)
+        if is_vosk_model_dir(normalized):
+            return normalized
+
+    normalized_fallback = _unwrap_single_child_dir(fallback)
+    return normalized_fallback
 
 
 @dataclass(slots=True)

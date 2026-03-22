@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from config import is_vosk_model_dir
 from modules.audio_input import AudioInputHandler
 from modules.file_transcriber import FileTranscriber
 from modules.language_detector import LanguageDetector
@@ -33,9 +34,9 @@ class PipelineController:
         target = (tgt_lang or "").strip().lower() or None
 
         available_langs = []
-        if self.realtime_stt.config.vosk_model_en.exists():
+        if is_vosk_model_dir(self.realtime_stt.config.vosk_model_en):
             available_langs.append("en")
-        if self.realtime_stt.config.vosk_model_hi.exists():
+        if is_vosk_model_dir(self.realtime_stt.config.vosk_model_hi):
             available_langs.append("hi")
 
         if source in {"en", "hi"} and source not in available_langs:

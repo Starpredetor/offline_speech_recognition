@@ -7,3 +7,4 @@ argostranslate
 nltk
 langdetect
 numpy
+Flask

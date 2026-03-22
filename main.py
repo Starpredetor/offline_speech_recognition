@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from config import CONFIG
+from modules.argos_setup import setup_argos_models
 from modules.file_transcriber import FileTranscriber
 from modules.pipeline import PipelineController
 from modules.realtime_stt import RealtimeSTTEngine
@@ -22,7 +23,8 @@ def show_menu() -> None:
     print("1. Start live transcription (Vosk)")
     print("2. Transcribe audio file (Faster-Whisper)")
     print("3. Translate text")
-    print("4. Exit")
+    print("4. Setup Argos translation models")
+    print("5. Exit")
 
 
 def run() -> None:
@@ -60,6 +62,12 @@ def run() -> None:
             print("\nTranslated:")
             print(translator.translate(text, from_lang=src_lang, to_lang=tgt_lang))
         elif choice == "4":
+            print("Setting up Argos translation models...")
+            ok, message = setup_argos_models()
+            print("\n" + ("=" * 60))
+            print(message)
+            print("=" * 60)
+        elif choice == "5":
             print("Goodbye.")
             return
         else:

@@ -11,3 +11,5 @@ venv/
 output/
 *.argosmodel
 *.zip
+vosk-model-en-us-0.42-gigaspeech/
+vosk-model-hi-0.22/
