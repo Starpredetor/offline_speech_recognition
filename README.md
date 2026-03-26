@@ -1,3 +1,4 @@
+## Phase 1 complete
 # Offline Speech Recognition
 
 A complete offline speech recognition system using:
