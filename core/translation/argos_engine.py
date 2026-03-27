@@ -6,13 +6,13 @@ from config import AppConfig
 
 
 class TranslationEngine:
-    """Argos Translate wrapper for offline translation."""
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
     @staticmethod
     def _get_argos_modules():
+        """Load Argos Translate modules with error handling."""
         try:
             package = importlib.import_module("argostranslate.package")
             translate = importlib.import_module("argostranslate.translate")
@@ -21,6 +21,7 @@ class TranslationEngine:
             raise RuntimeError("argos-translate is not installed. Install dependencies first.")
 
     def install_available_packages(self) -> None:
+        """Update package index and show available translation models."""
         package, _translate = self._get_argos_modules()
 
         package.update_package_index()
@@ -28,6 +29,16 @@ class TranslationEngine:
         print(f"Argos package index updated. Available packages: {len(available)}")
 
     def translate(self, text: str, from_lang: str, to_lang: str) -> str:
+        """Translate text from one language to another.
+
+        Args:
+            text: Text to translate
+            from_lang: Source language code (e.g., 'en', 'hi')
+            to_lang: Target language code
+
+        Returns:
+            Translated text
+        """
         _package, translate = self._get_argos_modules()
 
         if not text:

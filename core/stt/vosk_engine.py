@@ -9,7 +9,6 @@ from config import AppConfig, is_vosk_model_dir
 
 
 class RealtimeSTTEngine:
-    """Vosk-based real-time recognizer skeleton."""
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -18,6 +17,7 @@ class RealtimeSTTEngine:
 
     @staticmethod
     def _get_vosk_classes() -> tuple[Any, Any]:
+        """Load Vosk model and recognizer classes."""
         try:
             vosk = importlib.import_module("vosk")
         except ModuleNotFoundError:
@@ -30,11 +30,13 @@ class RealtimeSTTEngine:
         return model_cls, recognizer_cls
 
     def _resolve_model_path(self, lang: str) -> Path:
+        """Resolve the model path for a given language."""
         if lang == "hi":
             return self.config.vosk_model_hi
         return self.config.vosk_model_en
 
     def _get_model(self, lang: str) -> Any:
+        """Get or load a Vosk model for the specified language."""
         model = self._models.get(lang)
         if model is not None:
             return model
@@ -74,6 +76,7 @@ class RealtimeSTTEngine:
         return model
 
     def _get_recognizer(self, lang: str) -> Any:
+        """Get or create a Vosk recognizer for the specified language."""
         recognizer = self._recognizers.get(lang)
         if recognizer is not None:
             return recognizer
@@ -85,6 +88,15 @@ class RealtimeSTTEngine:
         return recognizer
 
     def accept_audio_chunk(self, audio_chunk: bytes, lang: str = "en") -> tuple[bool, str]:
+        """Process an audio chunk and return (is_final, text).
+
+        Args:
+            audio_chunk: PCM audio data
+            lang: Language code ('en' or 'hi')
+
+        Returns:
+            Tuple of (is_final, text) where is_final indicates final result
+        """
         recognizer = self._get_recognizer(lang)
 
         if recognizer.AcceptWaveform(audio_chunk):
@@ -95,8 +107,6 @@ class RealtimeSTTEngine:
         return False, partial.get("partial", "").strip()
 
     def transcribe_chunk(self, audio_chunk: bytes, lang: str = "en") -> str:
+        """Transcribe a chunk of audio and return the text (may be partial)."""
         _is_final, text = self.accept_audio_chunk(audio_chunk=audio_chunk, lang=lang)
         return text
-
-    def stream_live(self, lang: str = "en") -> None:
-        print("Live transcription entrypoint created. Connect AudioInputHandler stream here.")

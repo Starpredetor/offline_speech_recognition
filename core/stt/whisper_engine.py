@@ -10,19 +10,20 @@ from config import AppConfig
 
 @dataclass(slots=True)
 class TranscriptSegment:
+
     start: float
     end: float
     text: str
 
 
 class FileTranscriber:
-    """Faster-Whisper transcription engine for audio files."""
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self._model: Any | None = None
 
     def _get_model(self) -> Any:
+        """Load the Faster-Whisper model."""
         try:
             faster_whisper = importlib.import_module("faster_whisper")
         except ModuleNotFoundError:
@@ -44,6 +45,15 @@ class FileTranscriber:
         return self._model
 
     def transcribe(self, audio_path: Path, language: str = "en") -> Iterable[TranscriptSegment]:
+        """Transcribe an audio file and return segments with timestamps.
+
+        Args:
+            audio_path: Path to audio file
+            language: Language code (e.g., 'en', 'hi')
+
+        Returns:
+            Iterator of TranscriptSegment objects
+        """
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 

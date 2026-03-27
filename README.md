@@ -1,52 +1,124 @@
-## Phase 1 complete
 # Offline Speech Recognition
 
-A complete offline speech recognition system using:
-- **Realtime STT:** Vosk (English/Hindi)
-- **File STT:** Faster-Whisper
-- **Translation:** Argos Translate (EN↔HI)
-- **GUI:** Flask web interface with mic toggle and live output
+Real-time speech-to-text transcription and translation with a transparent overlay display. No internet connection required.
 
-## Quick Start
+## Features
 
-### Local Setup (Python 3.10+)
+- Real-time audio transcription (Vosk)
+- Offline batch file transcription (Faster-Whisper)
+- Offline translation (Argos Translate, EN↔HI)
+- Transparent subtitle overlay (Windows/macOS/Linux)
+- Multi-language support (English, Hindi)
+
+## Requirements
+
+- Python 3.10+
+- 4-5GB disk space for models
+- Supported OS: Windows, macOS, Linux
+
+## Installation
 
 ```bash
-# 1. Create virtual environment
 python -m venv .venv
 .venv\Scripts\activate  # Windows
-# or: source .venv/bin/activate  # macOS/Linux
+source .venv/bin/activate  # macOS/Linux
 
-# 2. Install dependencies
 pip install -r requirements.txt
-
-# 3. Setup translation models
-python -c "from modules.argos_setup import setup_argos_models; setup_argos_models()"
-
-# 4a. Run CLI
-python main.py
-
-# 4b. Run Web GUI
-python app.py
-# → Open http://localhost:5000 in browser
-```
-
-### Docker Setup
-
-```bash
-# Build image (~3-4GB, includes all models)
-docker build -t offline-speech:latest .
-
-# Run container
-docker run -it --rm \
-  -v /dev/snd:/dev/snd \
-  -p 5000:5000 \
-  offline-speech:latest
-
-# → Open http://localhost:5000 in browser
+python core/argos_setup.py
 ```
 
 ## Usage
+
+### CLI
+
+```bash
+python main.py
+```
+
+Options:
+1. Real-time transcription with optional overlay
+2. Transcribe audio file (WAV, MP3)
+3. Translate text
+4. Setup translation models
+5. Exit
+
+### Web Interface
+
+```bash
+python app.py
+# Open http://localhost:5000
+```
+
+### Python API
+
+```python
+from config import CONFIG
+from core import TranscriptionController
+
+controller = TranscriptionController(CONFIG)
+controller.setup_directories()
+
+controller.run_realtime(src_lang='auto', tgt_lang='hi')
+controller.run_file(Path('audio.wav'), src_lang='en', tgt_lang='hi')
+```
+
+## Project Structure
+
+```
+core/
+  audio/              Audio capture
+  stt/                Speech-to-text engines
+  translation/        Translation & language detection
+  window/             Window tracking
+  controller.py       Main orchestrator
+ui/
+  overlay.py          PySide6 subtitle overlay
+models/               Pre-trained models
+main.py              CLI entry point
+app.py               Flask web app
+config.py            Configuration
+```
+
+## Models
+
+Included models:
+- Vosk: en-us-0.42, hi-0.22
+- Argos: translate-en_hi, translate-hi_en
+- Whisper: auto-downloaded (small/medium/large)
+
+Configure in `config.py`.
+
+## Configuration
+
+Edit `config.py`:
+- `whisper_model_size`: small/medium/large
+- `whisper_device`: auto/cpu/cuda
+- Model paths and sample rate
+
+## Docker
+
+```bash
+docker build -t offline-speech:latest .
+docker run -it -p 5000:5000 offline-speech:latest
+```
+
+## Troubleshooting
+
+**No microphone detected**
+- Check system audio settings
+- Ensure microphone is enabled
+
+**Vosk model not found**
+- Extract ZIP files in `models/vosk/`
+
+**Argos not working**
+- Run `python core/argos_setup.py`
+
+**High latency**
+- Use specific language instead of auto-detection
+- Use smaller Whisper model
+
+
 
 **CLI Mode:**
 - Option 1: Realtime mic transcription (Vosk)

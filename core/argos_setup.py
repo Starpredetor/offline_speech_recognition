@@ -6,7 +6,11 @@ from config import CONFIG
 
 
 def setup_argos_models() -> tuple[bool, str]:
-    """Install .argosmodel files from models/argos directory into Argos Translate."""
+    """Install .argosmodel files from models/argos directory into Argos Translate.
+
+    Returns:
+        Tuple of (success, message)
+    """
     try:
         import argostranslate.package as package
         import argostranslate.translate as translate

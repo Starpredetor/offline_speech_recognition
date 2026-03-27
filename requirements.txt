@@ -1,10 +1,26 @@
-faster-whisper
-vosk
-sounddevice
-pyaudio
-ffmpeg-python
-argostranslate
-nltk
-langdetect
-numpy
-Flask
+# Core Dependencies
+faster-whisper>=0.10.0
+vosk>=0.3.45
+sounddevice>=0.4.5
+pyaudio>=0.2.13
+argostranslate>=1.8.0
+nltk>=3.8.1
+langdetect>=1.0.9
+numpy>=1.24.0
+
+# UI Framework
+PySide6>=6.6.0
+
+# Window Management
+pygetwindow>=0.0.9
+
+# Platform-specific window tracking (optional - install as needed)
+# For Windows:
+pywin32>=305; sys_platform == 'win32'
+
+# For macOS:
+pyobjc-framework-Quartz>=9.0; sys_platform == 'darwin'
+
+# For Linux:
+python-xlib>=0.33; sys_platform == 'linux'
+
