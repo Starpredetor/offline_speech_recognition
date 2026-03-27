@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from config import AppConfig, is_vosk_model_dir
@@ -14,10 +16,13 @@ class RealtimeSTTEngine:
         self.config = config
         self._models: dict[str, Any] = {}
         self._recognizers: dict[str, Any] = {}
+        self._model_lock = RLock()
+        self._recognizer_lock = RLock()
+        self._model_cls: Any | None = None
+        self._recognizer_cls: Any | None = None
 
     @staticmethod
     def _get_vosk_classes() -> tuple[Any, Any]:
-        """Load Vosk model and recognizer classes."""
         try:
             vosk = importlib.import_module("vosk")
         except ModuleNotFoundError:
@@ -29,19 +34,27 @@ class RealtimeSTTEngine:
             raise RuntimeError("vosk package is installed but required classes were not found")
         return model_cls, recognizer_cls
 
+    def _ensure_vosk_classes(self) -> tuple[Any, Any]:
+        if self._model_cls is not None and self._recognizer_cls is not None:
+            return self._model_cls, self._recognizer_cls
+
+        model_cls, recognizer_cls = self._get_vosk_classes()
+        self._model_cls = model_cls
+        self._recognizer_cls = recognizer_cls
+        return model_cls, recognizer_cls
+
     def _resolve_model_path(self, lang: str) -> Path:
-        """Resolve the model path for a given language."""
         if lang == "hi":
             return self.config.vosk_model_hi
         return self.config.vosk_model_en
 
     def _get_model(self, lang: str) -> Any:
-        """Get or load a Vosk model for the specified language."""
-        model = self._models.get(lang)
-        if model is not None:
-            return model
+        with self._model_lock:
+            model = self._models.get(lang)
+            if model is not None:
+                return model
 
-        model_cls, _recognizer_cls = self._get_vosk_classes()
+        model_cls, _recognizer_cls = self._ensure_vosk_classes()
         model_path = self._resolve_model_path(lang)
         if not model_path.exists():
             zip_hint = self.config.vosk_model_hi_zip if lang == "hi" else self.config.vosk_model_en_zip
@@ -72,41 +85,87 @@ class RealtimeSTTEngine:
                 f"Failed to load Vosk model from {model_path}: {exc}. "
                 "Verify the model is fully extracted and not nested twice."
             )
-        self._models[lang] = model
+        with self._model_lock:
+            existing = self._models.get(lang)
+            if existing is not None:
+                return existing
+            self._models[lang] = model
         return model
 
     def _get_recognizer(self, lang: str) -> Any:
-        """Get or create a Vosk recognizer for the specified language."""
-        recognizer = self._recognizers.get(lang)
-        if recognizer is not None:
-            return recognizer
+        with self._recognizer_lock:
+            recognizer = self._recognizers.get(lang)
+            if recognizer is not None:
+                return recognizer
 
-        _model_cls, recognizer_cls = self._get_vosk_classes()
+        _model_cls, recognizer_cls = self._ensure_vosk_classes()
         model = self._get_model(lang)
         recognizer = recognizer_cls(model, self.config.sample_rate)
-        self._recognizers[lang] = recognizer
+
+        with self._recognizer_lock:
+            existing = self._recognizers.get(lang)
+            if existing is not None:
+                return existing
+            self._recognizers[lang] = recognizer
         return recognizer
 
+    def prepare_languages(self, languages: list[str]) -> None:
+        supported = [lang for lang in languages if lang in {"en", "hi"}]
+        if not supported:
+            return
+
+        # Load multiple requested languages concurrently to reduce warmup time.
+        if len(supported) == 1:
+            self._get_recognizer(supported[0])
+            return
+
+        with ThreadPoolExecutor(max_workers=len(supported)) as executor:
+            futures = [executor.submit(self._get_recognizer, lang) for lang in supported]
+            for future in futures:
+                future.result()
+
+    def is_language_ready(self, lang: str) -> bool:
+        return lang in self._recognizers
+
+    def reset_recognizers(self, lang: str | None = None) -> None:
+        def _reset(recognizer: Any) -> None:
+            reset_fn = getattr(recognizer, "Reset", None)
+            if callable(reset_fn):
+                reset_fn()
+
+        with self._recognizer_lock:
+            if lang is None:
+                for recognizer in self._recognizers.values():
+                    _reset(recognizer)
+                return
+
+            recognizer = self._recognizers.get(lang)
+            if recognizer is not None:
+                _reset(recognizer)
+
+    def clear_recognizer_cache(self, lang: str | None = None) -> None:
+        with self._recognizer_lock:
+            if lang is None:
+                self._recognizers.clear()
+                return
+            self._recognizers.pop(lang, None)
+
     def accept_audio_chunk(self, audio_chunk: bytes, lang: str = "en") -> tuple[bool, str]:
-        """Process an audio chunk and return (is_final, text).
+        state, text = self.accept_audio_chunk_detailed(audio_chunk=audio_chunk, lang=lang)
+        return state == "final", text
 
-        Args:
-            audio_chunk: PCM audio data
-            lang: Language code ('en' or 'hi')
-
-        Returns:
-            Tuple of (is_final, text) where is_final indicates final result
-        """
+    def accept_audio_chunk_detailed(self, audio_chunk: bytes, lang: str = "en") -> tuple[str, str]:
         recognizer = self._get_recognizer(lang)
 
         if recognizer.AcceptWaveform(audio_chunk):
             result = json.loads(recognizer.Result())
-            return True, result.get("text", "").strip()
+            text = result.get("text", "").strip()
+            return ("final" if text else "empty"), text
 
         partial = json.loads(recognizer.PartialResult())
-        return False, partial.get("partial", "").strip()
+        text = partial.get("partial", "").strip()
+        return ("partial" if text else "empty"), text
 
     def transcribe_chunk(self, audio_chunk: bytes, lang: str = "en") -> str:
-        """Transcribe a chunk of audio and return the text (may be partial)."""
         _is_final, text = self.accept_audio_chunk(audio_chunk=audio_chunk, lang=lang)
         return text

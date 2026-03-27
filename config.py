@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from PySide6.QtCore import QStandardPaths
 
-BASE_DIR = Path(__file__).resolve().parent
+
+APP_NAME = "OfflineSpeechRecognition"
+
+
+def get_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def get_app_data_dir() -> Path:
+    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    path = Path(location) if location else Path.home() / f".{APP_NAME.lower()}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+BASE_DIR = get_base_dir()
 MODELS_DIR = BASE_DIR / "models"
+APP_DATA_DIR = get_app_data_dir()
+LOG_DIR = APP_DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _pick_first_existing(candidates: list[Path]) -> Path:
@@ -49,6 +71,10 @@ def _pick_first_vosk_dir(patterns: list[str], fallback: Path) -> Path:
 
 @dataclass(slots=True)
 class AppConfig:
+    app_name: str = APP_NAME
+    app_data_dir: Path = APP_DATA_DIR
+    log_dir: Path = LOG_DIR
+
     whisper_model_size: str = "small"
     whisper_device: str = "auto"
     whisper_compute_type: str = "int8"

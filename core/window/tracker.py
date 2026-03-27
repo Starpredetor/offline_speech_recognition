@@ -21,12 +21,10 @@ class WindowInfo:
 class WindowTracker:
 
     def __init__(self) -> None:
-        """Initialize window tracker with platform-specific implementation."""
         self._backend = self._init_backend()
 
     @staticmethod
     def _init_backend() -> WindowTrackerBackend:
-        """Initialize platform-specific window tracker."""
         if sys.platform == "win32":
             return WindowsWindowTracker()
         elif sys.platform == "darwin":
@@ -35,53 +33,30 @@ class WindowTracker:
             return LinuxWindowTracker()
 
     def get_active_window(self) -> Optional[WindowInfo]:
-        """Get information about the currently active window.
-
-        Returns:
-            WindowInfo object or None if unable to get active window
-        """
         return self._backend.get_active_window()
 
     def get_available_windows(self) -> list[WindowInfo]:
-        """Get list of all available windows.
-
-        Returns:
-            List of WindowInfo objects
-        """
         return self._backend.get_available_windows()
 
     def focus_window(self, window_title: str) -> bool:
-        """Bring a window to focus by title.
-
-        Args:
-            window_title: Title of window to focus
-
-        Returns:
-            True if successful, False otherwise
-        """
         return self._backend.focus_window(window_title)
 
 
 class WindowTrackerBackend:
 
     def get_active_window(self) -> Optional[WindowInfo]:
-        """Get the active window."""
         raise NotImplementedError
 
     def get_available_windows(self) -> list[WindowInfo]:
-        """Get all available windows."""
         raise NotImplementedError
 
     def focus_window(self, window_title: str) -> bool:
-        """Focus a window by title."""
         raise NotImplementedError
 
 
 class WindowsWindowTracker(WindowTrackerBackend):
-    """Windows-specific window tracking using win32gui."""
 
     def __init__(self) -> None:
-        """Initialize Windows window tracker."""
         try:
             import win32gui
             import win32con
@@ -94,7 +69,6 @@ class WindowsWindowTracker(WindowTrackerBackend):
             )
 
     def get_active_window(self) -> Optional[WindowInfo]:
-        """Get the currently active window on Windows."""
         try:
             hwnd = self.win32gui.GetForegroundWindow()
             if hwnd == 0:
@@ -116,7 +90,6 @@ class WindowsWindowTracker(WindowTrackerBackend):
             return None
 
     def get_available_windows(self) -> list[WindowInfo]:
-        """Get all visible windows on Windows."""
         windows: list[WindowInfo] = []
 
         def _enum_windows(hwnd, _lParam) -> bool:
@@ -149,7 +122,6 @@ class WindowsWindowTracker(WindowTrackerBackend):
         return windows
 
     def focus_window(self, window_title: str) -> bool:
-        """Focus a window by title on Windows."""
         try:
             hwnd = self.win32gui.FindWindow(None, window_title)
             if hwnd == 0:
@@ -161,10 +133,8 @@ class WindowsWindowTracker(WindowTrackerBackend):
 
 
 class MacWindowTracker(WindowTrackerBackend):
-    """macOS-specific window tracking using Quartz."""
 
     def __init__(self) -> None:
-        """Initialize macOS window tracker."""
         try:
             from Quartz import CGWindowListCopyWindowInfo, kCGWindowListOptionOnScreenOnly
             from Quartz import kCGWindowName, kCGWindowBounds
@@ -179,7 +149,6 @@ class MacWindowTracker(WindowTrackerBackend):
             )
 
     def get_active_window(self) -> Optional[WindowInfo]:
-        """Get the currently active window on macOS."""
         try:
             windows = self.CGWindowListCopyWindowInfo(self.kCGWindowListOptionOnScreenOnly, 0)
             if not windows:
@@ -201,7 +170,6 @@ class MacWindowTracker(WindowTrackerBackend):
             return None
 
     def get_available_windows(self) -> list[WindowInfo]:
-        """Get all visible windows on macOS."""
         windows_list: list[WindowInfo] = []
 
         try:
@@ -224,7 +192,6 @@ class MacWindowTracker(WindowTrackerBackend):
         return windows_list
 
     def focus_window(self, window_title: str) -> bool:
-        """Focus a window by title on macOS."""
         try:
             import subprocess
             script = f'tell app "System Events" to set frontmost of (processes whose name contains "{window_title}") to true'
@@ -235,10 +202,8 @@ class MacWindowTracker(WindowTrackerBackend):
 
 
 class LinuxWindowTracker(WindowTrackerBackend):
-    """Linux-specific window tracking using X11/Xlib."""
 
     def __init__(self) -> None:
-        """Initialize Linux window tracker."""
         try:
             from Xlib import display
             self.display = display.Display()
@@ -249,7 +214,6 @@ class LinuxWindowTracker(WindowTrackerBackend):
             )
 
     def get_active_window(self) -> Optional[WindowInfo]:
-        """Get the currently active window on Linux."""
         try:
             root = self.display.screen().root
             # Get active window from _NET_ACTIVE_WINDOW property
@@ -278,7 +242,6 @@ class LinuxWindowTracker(WindowTrackerBackend):
             return None
 
     def get_available_windows(self) -> list[WindowInfo]:
-        """Get all visible windows on Linux."""
         windows_list: list[WindowInfo] = []
 
         try:
@@ -307,7 +270,6 @@ class LinuxWindowTracker(WindowTrackerBackend):
         return windows_list
 
     def focus_window(self, window_title: str) -> bool:
-        """Focus a window by title on Linux."""
         try:
             import subprocess
             subprocess.run(["wmctrl", "-a", window_title], check=True)

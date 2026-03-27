@@ -16,11 +16,6 @@ from ui import OverlayManager, OverlayConfig
 class TranscriptionController:
 
     def __init__(self, config: AppConfig) -> None:
-        """Initialize the transcription controller.
-
-        Args:
-            config: AppConfig object with settings
-        """
         self.config = config
         self.realtime_stt = RealtimeSTTEngine(config=config)
         self.file_transcriber = FileTranscriber(config=config)
@@ -33,17 +28,11 @@ class TranscriptionController:
         )
 
     def setup_directories(self) -> None:
-        """Create required model directories."""
         ensure_directory(self.config.whisper_models_dir)
         ensure_directory(self.config.vosk_model_en.parent)
         ensure_directory(self.config.argos_models_dir)
 
     def get_available_languages(self) -> list[str]:
-        """Get list of available STT languages.
-
-        Returns:
-            List of language codes (e.g., ['en', 'hi'])
-        """
         langs: list[str] = []
         if is_vosk_model_dir(self.realtime_stt.config.vosk_model_en):
             langs.append("en")
@@ -53,15 +42,6 @@ class TranscriptionController:
 
     @staticmethod
     def _resolve_target(detected_lang: str, selected_target: str | None) -> str | None:
-        """Resolve target language for translation.
-
-        Args:
-            detected_lang: Detected source language
-            selected_target: Selected target language or 'other'
-
-        Returns:
-            Target language code or None
-        """
         if selected_target is None:
             return None
         if selected_target == "other":
@@ -78,13 +58,6 @@ class TranscriptionController:
         tgt_lang: str | None = None,
         target_window: Optional[WindowInfo] = None,
     ) -> None:
-        """Run real-time transcription and translation.
-
-        Args:
-            src_lang: Source language ('en', 'hi', 'auto')
-            tgt_lang: Target language ('en', 'hi', 'other', None)
-            target_window: Optional WindowInfo to attach overlay to
-        """
         print_section("Real-Time Transcription Mode")
         source = src_lang if src_lang in {"en", "hi", "auto"} else "auto"
         target = (tgt_lang or "").strip().lower() or None
@@ -111,6 +84,7 @@ class TranscriptionController:
         print("Listening from microphone.")
         print("Source language mode:", source)
         print("Target language mode:", target or "none")
+        self.realtime_stt.reset_recognizers()
         if target_window:
             print(f"Target window: {target_window}")
             self.overlay_manager.initialize()
@@ -178,13 +152,6 @@ class TranscriptionController:
         src_lang: str = "en",
         tgt_lang: str | None = None,
     ) -> None:
-        """Transcribe an audio file.
-
-        Args:
-            audio_path: Path to audio file
-            src_lang: Source language code
-            tgt_lang: Target language code (optional)
-        """
         print_section("File Transcription Mode")
         segments = list(self.file_transcriber.transcribe(audio_path=audio_path, language=src_lang))
         lines = self.timestamp_generator.to_lines(segments)

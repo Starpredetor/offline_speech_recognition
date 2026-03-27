@@ -5,23 +5,10 @@ from pathlib import Path
 
 
 def ensure_directory(path: Path) -> None:
-    """Create directory if it doesn't exist.
-
-    Args:
-        path: Directory path to create
-    """
     path.mkdir(parents=True, exist_ok=True)
 
 
 def format_timestamp(seconds: float) -> str:
-    """Format seconds as HH:MM:SS or MM:SS.
-
-    Args:
-        seconds: Duration in seconds
-
-    Returns:
-        Formatted timestamp string
-    """
     total = int(max(seconds, 0))
     td = timedelta(seconds=total)
     minutes, sec = divmod(td.seconds, 60)
@@ -32,9 +19,4 @@ def format_timestamp(seconds: float) -> str:
 
 
 def print_section(title: str) -> None:
-    """Print a formatted section header.
-
-    Args:
-        title: Section title to display
-    """
     print(f"\n=== {title} ===")

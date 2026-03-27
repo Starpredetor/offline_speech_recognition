@@ -11,16 +11,6 @@ DetectorFactory.seed = 0
 class LanguageDetector:
 
     def detect_language(self, text: str, allowed: Iterable[str] | None = None, fallback: str = "en") -> str:
-        """Detect the language of a text string.
-
-        Args:
-            text: Text to detect language for
-            allowed: Optional set of allowed language codes to restrict detection
-            fallback: Language code to return if detection fails
-
-        Returns:
-            Detected language code
-        """
         normalized = text.strip()
         if not normalized:
             return fallback
@@ -38,17 +28,6 @@ class LanguageDetector:
         return lang
 
     def choose_best_candidate(self, candidates: list[tuple[str, str]], fallback: str = "en") -> tuple[str, str]:
-        """Select the best transcript from candidate (lang, text) pairs.
-
-        Uses word count and language match confidence to score candidates.
-
-        Args:
-            candidates: List of (language_code, text) tuples
-            fallback: Default language if no good candidate found
-
-        Returns:
-            Tuple of (best_text, detected_language)
-        """
         non_empty = [(lang, text.strip()) for lang, text in candidates if text.strip()]
         if not non_empty:
             return "", fallback
