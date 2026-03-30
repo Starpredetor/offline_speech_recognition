@@ -75,10 +75,6 @@ class AppConfig:
     app_data_dir: Path = APP_DATA_DIR
     log_dir: Path = LOG_DIR
 
-    whisper_model_size: str = "small"
-    whisper_device: str = "auto"
-    whisper_compute_type: str = "int8"
-
     vosk_model_en: Path = _pick_first_vosk_dir(
         patterns=["vosk-model-en*", "vosk-model-small-en*"],
         fallback=MODELS_DIR / "vosk" / "vosk-model-en-us-0.42-gigaspeech",
@@ -104,8 +100,6 @@ class AppConfig:
             MODELS_DIR / "argos" / "translate-hi_en.argosmodel",
         ]
     )
-
-    whisper_models_dir: Path = MODELS_DIR / "whisper"
 
     sample_rate: int = 16000
     channels: int = 1

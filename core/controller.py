@@ -5,9 +5,8 @@ from typing import Optional, Callable
 
 from config import AppConfig, is_vosk_model_dir
 from core.audio import AudioInputHandler
-from core.stt import RealtimeSTTEngine, FileTranscriber
+from core.stt import RealtimeSTTEngine
 from core.translation import TranslationEngine, LanguageDetector
-from core.timestamp import TimestampGenerator
 from core.utils import ensure_directory, print_section
 from core.window import WindowTracker, WindowInfo
 from ui import OverlayManager, OverlayConfig
@@ -18,9 +17,7 @@ class TranscriptionController:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.realtime_stt = RealtimeSTTEngine(config=config)
-        self.file_transcriber = FileTranscriber(config=config)
         self.translator = TranslationEngine(config=config)
-        self.timestamp_generator = TimestampGenerator()
         self.language_detector = LanguageDetector()
         self.window_tracker = WindowTracker()
         self.overlay_manager = OverlayManager(
@@ -28,7 +25,6 @@ class TranscriptionController:
         )
 
     def setup_directories(self) -> None:
-        ensure_directory(self.config.whisper_models_dir)
         ensure_directory(self.config.vosk_model_en.parent)
         ensure_directory(self.config.argos_models_dir)
 
@@ -152,20 +148,7 @@ class TranscriptionController:
         src_lang: str = "en",
         tgt_lang: str | None = None,
     ) -> None:
-        print_section("File Transcription Mode")
-        segments = list(self.file_transcriber.transcribe(audio_path=audio_path, language=src_lang))
-        lines = self.timestamp_generator.to_lines(segments)
-
-        print_section("Transcript")
-        for line in lines:
-            print(line.render())
-
-        if tgt_lang:
-            print_section("Translated Transcript")
-            for line in lines:
-                translated_text = self.translator.translate(
-                    line.text,
-                    from_lang=src_lang,
-                    to_lang=tgt_lang,
-                )
-                print(f"[{line.render().split(']')[0][1:]}] {translated_text}")
+        raise RuntimeError(
+            "File transcription via Whisper has been removed. "
+            "Use real-time Vosk transcription instead."
+        )

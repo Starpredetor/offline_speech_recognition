@@ -19,7 +19,7 @@ COPY static/ ./static/
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN mkdir -p models/vosk models/argos models/whisper
+RUN mkdir -p models/vosk models/argos
 
 RUN cd models/vosk && \
     wget -q https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-gigaspeech.zip && \

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
-from core.stt.whisper_engine import TranscriptSegment
 from core.utils import format_timestamp
+
+
+class TranscriptSegmentLike(Protocol):
+    start: float
+    end: float
+    text: str
 
 
 @dataclass(slots=True)
@@ -19,7 +25,7 @@ class TimestampedLine:
 
 class TimestampGenerator:
 
-    def to_lines(self, segments: list[TranscriptSegment]) -> list[TimestampedLine]:
+    def to_lines(self, segments: list[TranscriptSegmentLike]) -> list[TimestampedLine]:
         lines: list[TimestampedLine] = []
         for segment in segments:
             if not segment.text:

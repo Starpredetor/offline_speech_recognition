@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional
 import numpy as np
 
@@ -43,12 +44,16 @@ class WindowAudioWorker(QThread):
         self._attempt_stop_event: Optional[threading.Event] = None
 
     def run(self):
+        translation_executor: ThreadPoolExecutor | None = None
+        if self.target_lang != "none":
+            # Keep translation work off the hot audio callback path.
+            translation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="caption-translate")
+
         try:
             if not self.target_window:
                 self.error_signal.emit("No window selected for audio capture")
                 return
 
-            # Sanitize title for logging (remove special Unicode chars)
             safe_title = self.target_window.title.encode('ascii', errors='replace').decode('ascii')
             print(f"[DEBUG] Worker thread started for: {safe_title}")
             self.message_signal.emit("status", f"🎤 Capturing audio from: {self.target_window.title}")
@@ -108,6 +113,9 @@ class WindowAudioWorker(QThread):
             attempt_failover_triggered = False
             silent_chunk_count = 0  # Track consecutive silent chunks for pause detection
             silence_threshold_chunks = 10  # ~0.8s of silence at 12ms per chunk triggers clear
+            translation_cache: dict[tuple[str, str, str], str] = {}
+            latest_translation_seq = 0
+            latest_emitted_seq = 0
 
             def chunk_text(text: str, max_length: int = 90, break_on_punctuation: bool = True) -> list[str]:
                 if len(text) <= max_length:
@@ -150,6 +158,7 @@ class WindowAudioWorker(QThread):
             def emit_transcript(text: str, detected_lang: str, is_final: bool) -> None:
                 nonlocal last_preview, silent_chunk_count
                 nonlocal partial_count, final_count, attempt_output_count
+                nonlocal latest_translation_seq, latest_emitted_seq
                 if not text.strip():
                     return
 
@@ -157,40 +166,90 @@ class WindowAudioWorker(QThread):
                 if self.capture_mode == "mic" and not is_final:
                     return
 
-                display_text = text
-                display_lang = detected_lang
-                if self.target_lang != "none":
-                    resolved_target = self.controller._resolve_target(detected_lang, self.target_lang)
-                    if resolved_target and resolved_target != detected_lang:
-                        try:
-                            display_text = self.controller.translator.translate(
-                                text,
-                                from_lang=detected_lang,
-                                to_lang=resolved_target,
-                            )
-                            display_lang = resolved_target
-                        except RuntimeError as exc:
-                            self.message_signal.emit("warning", f"⚠ Translation unavailable: {exc}")
+                source_text = text
 
-                if not is_final and display_text == last_preview:
+                if not is_final and source_text == last_preview:
                     return
 
                 attempt_output_count += 1
-                silent_chunk_count = 0  # Reset silence counter when new text arrives
+                silent_chunk_count = 0  
 
                 if is_final:
                     final_count += 1
                     last_preview = ""
-                    print(f"[STT:{display_lang}] {display_text}")
-                    self.subtitle_signal.emit(display_text)
-                    self.message_signal.emit("stt", f"[{display_lang.upper()}] {display_text}")
+                    print(f"[STT:{detected_lang}] {source_text}")
+                    self.subtitle_signal.emit(source_text)
+                    self.message_signal.emit("stt", f"[{detected_lang.upper()}] {source_text}")
+                else:
+                    partial_count += 1
+                    last_preview = source_text
+                    preview_text = f"{source_text} ..."
+                    print(f"[STT-PARTIAL:{detected_lang}] {source_text}")
+                    self.message_signal.emit("stt_partial", f"[{detected_lang.upper()}] {preview_text}")
+
+                if translation_executor is None or not is_final:
                     return
 
-                partial_count += 1
-                last_preview = display_text
-                preview_text = f"{display_text} ..."
-                print(f"[STT-PARTIAL:{display_lang}] {display_text}")
-                self.message_signal.emit("stt_partial", f"[{display_lang.upper()}] {preview_text}")
+                resolved_target = self.controller._resolve_target(detected_lang, self.target_lang)
+                if not resolved_target or resolved_target == detected_lang:
+                    return
+
+                cache_key = (detected_lang, resolved_target, source_text)
+                cached_translation = translation_cache.get(cache_key)
+                if cached_translation is not None:
+                    self.subtitle_signal.emit(cached_translation)
+                    self.message_signal.emit("stt", f"[{resolved_target.upper()}] {cached_translation}")
+                    return
+
+                latest_translation_seq += 1
+                request_seq = latest_translation_seq
+
+                def _translate_job(seq: int, source: str, from_lang: str, to_lang: str):
+                    try:
+                        translated_text = self.controller.translator.translate(
+                            source,
+                            from_lang=from_lang,
+                            to_lang=to_lang,
+                        )
+                        return (seq, source, from_lang, to_lang, translated_text, None)
+                    except RuntimeError as exc:
+                        return (seq, source, from_lang, to_lang, "", str(exc))
+
+                translation_future = translation_executor.submit(
+                    _translate_job,
+                    request_seq,
+                    source_text,
+                    detected_lang,
+                    resolved_target,
+                )
+
+                def _on_translation_done(fut: Future) -> None:
+                    nonlocal latest_emitted_seq
+                    if self._stop_event.is_set():
+                        return
+
+                    if fut.cancelled():
+                        return
+
+                    try:
+                        seq, source, from_lang, to_lang, translated_text, error_message = fut.result()
+                    except Exception as exc:
+                        self.message_signal.emit("warning", f"⚠ Translation worker error: {exc}")
+                        return
+
+                    if seq < latest_translation_seq or seq <= latest_emitted_seq:
+                        return
+
+                    latest_emitted_seq = seq
+                    if error_message:
+                        self.message_signal.emit("warning", f"⚠ Translation unavailable: {error_message}")
+                        return
+
+                    translation_cache[(from_lang, to_lang, source)] = translated_text
+                    self.subtitle_signal.emit(translated_text)
+                    self.message_signal.emit("stt", f"[{to_lang.upper()}] {translated_text}")
+
+                translation_future.add_done_callback(_on_translation_done)
 
             def process_chunk(chunk: bytes) -> None:
                 nonlocal chunk_count, non_silent_chunk_count, last_debug_report, first_chunk_seen
@@ -418,6 +477,8 @@ class WindowAudioWorker(QThread):
             traceback.print_exc()
             self.error_signal.emit(str(e))
         finally:
+            if translation_executor is not None:
+                translation_executor.shutdown(wait=False, cancel_futures=True)
             print(f"[DEBUG] Worker thread finished")
             self.finished_signal.emit()
 

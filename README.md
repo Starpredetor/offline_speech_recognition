@@ -5,7 +5,6 @@ Real-time speech-to-text transcription and translation with a transparent overla
 ## Features
 
 - Real-time audio transcription (Vosk)
-- Offline batch file transcription (Faster-Whisper)
 - Offline translation (Argos Translate, EN↔HI)
 - Transparent subtitle overlay (Windows/macOS/Linux)
 - Multi-language support (English, Hindi)
@@ -59,7 +58,6 @@ controller = TranscriptionController(CONFIG)
 controller.setup_directories()
 
 controller.run_realtime(src_lang='auto', tgt_lang='hi')
-controller.run_file(Path('audio.wav'), src_lang='en', tgt_lang='hi')
 ```
 
 ## Project Structure
@@ -84,15 +82,12 @@ config.py            Configuration
 Included models:
 - Vosk: en-us-0.42, hi-0.22
 - Argos: translate-en_hi, translate-hi_en
-- Whisper: auto-downloaded (small/medium/large)
 
 Configure in `config.py`.
 
 ## Configuration
 
 Edit `config.py`:
-- `whisper_model_size`: small/medium/large
-- `whisper_device`: auto/cpu/cuda
 - Model paths and sample rate
 
 ## Docker
@@ -116,15 +111,13 @@ docker run -it -p 5000:5000 offline-speech:latest
 
 **High latency**
 - Use specific language instead of auto-detection
-- Use smaller Whisper model
 
 
 
 **CLI Mode:**
 - Option 1: Realtime mic transcription (Vosk)
-- Option 2: Transcribe audio file (Faster-Whisper)
-- Option 3: Translate text
-- Option 4: Setup translation models
+- Option 2: Translate text
+- Option 3: Setup translation models
 
 **Web GUI:**
 - Select source language (Auto/EN/HI)
@@ -136,7 +129,6 @@ docker run -it -p 5000:5000 offline-speech:latest
 
 - **Vosk models:** ~2GB (auto-extracted in Docker)
 - **Argos models:** ~500MB (auto-setup)
-- **Whisper:** Auto-downloaded on first use (200MB-1.5GB)
 
 Model links (for manual download):
 - [Vosk English Giga](https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-gigaspeech.zip)
