@@ -99,30 +99,31 @@ $$
 
 Adaptive RMS-driven noise floor update:
 
-- Initial $\text{noise\_floor}=120$
-- If $\text{RMS}<1.35\cdot\text{noise\_floor}$:
+- Let $n_f$ denote the adaptive noise-floor estimate and $r$ denote RMS.
+- Initial $n_f=120$
+- If $r<1.35\,n_f$:
 
 $$
-\text{noise\_floor}_{t+1}=0.985\,\text{noise\_floor}_t + 0.015\,\max(1,\text{RMS})
+n_{f,t+1}=0.985\,n_{f,t} + 0.015\,\max(1,r)
 $$
 
 - Else:
 
 $$
-\text{noise\_floor}_{t+1}=0.998\,\text{noise\_floor}_t + 0.002\,\max(1,\text{RMS})
+n_{f,t+1}=0.998\,n_{f,t} + 0.002\,\max(1,r)
 $$
 
 Gate threshold:
 
 $$
-\theta=\max(70,1.4\cdot\text{noise\_floor})
+θ=\max(70,1.4\,n_f)
 $$
 
 Piecewise gain:
 
-- $g=0.18$, if $\text{RMS}<\theta$
-- $g=0.45$, if $\theta\le\text{RMS}<1.3\theta$
-- $g=0.75$, if $1.3\theta\le\text{RMS}<1.9\theta$
+- $g=0.18$, if $r<θ$
+- $g=0.45$, if $θ\le r<1.3θ$
+- $g=0.75$, if $1.3θ\le r<1.9θ$
 - $g=1.0$, otherwise
 
 Output clipping range:
@@ -269,6 +270,7 @@ python main.py
 - Vosk Hindi: https://alphacephei.com/vosk/models/vosk-model-hi-0.22.zip
 - Argos English-Hindi: https://argos-net.com/v1/translate-en_hi-1_1.argosmodel
 - Argos Hindi-English: https://argos-net.com/v1/translate-hi_en-1_1.argosmodel
+
 
 
 
