@@ -8,21 +8,21 @@ This system performs real-time transcription and optional translation with no cl
 
 Pipeline objective:
 
-\[
+$$
 x(t) \rightarrow \hat{y}_{\text{ASR}} \rightarrow \hat{y}_{\text{MT}} \rightarrow \text{overlay/UI}
-\]
+$$
 
 where:
 
-- \(x(t)\): captured audio waveform
-- \(\hat{y}_{\text{ASR}}\): ASR text hypothesis
-- \(\hat{y}_{\text{MT}}\): translated hypothesis
+- $x(t)$: captured audio waveform
+- $\hat{y}_{\text{ASR}}$: ASR text hypothesis
+- $\hat{y}_{\text{MT}}$: translated hypothesis
 
 Supported language set in current code path:
 
-\[
+$$
 \mathcal{L}=\{\text{en},\text{hi}\}
-\]
+$$
 
 ## 2. Current Measurement Status (As of 2026-04-14)
 
@@ -66,11 +66,11 @@ Chunk/block duration:
 
 Blocksize equation:
 
-\[
+$$
 N_{\text{block}} = f_s \cdot \frac{T_{\text{chunk}}}{1000}
-\]
+$$
 
-where \(f_s\) is capture sample rate and \(T_{\text{chunk}}\) is in ms.
+where $f_s$ is capture sample rate and $T_{\text{chunk}}$ is in ms.
 
 Realtime queue policy:
 
@@ -79,11 +79,11 @@ Realtime queue policy:
 
 ### 3.3 Channel Reduction and Resampling
 
-For multichannel input \(c>1\), mono fold-down is arithmetic mean per frame:
+For multichannel input $c>1$, mono fold-down is arithmetic mean per frame:
 
-\[
+$$
 x_{\text{mono}}[n] = \frac{1}{c}\sum_{k=1}^{c} x_k[n]
-\]
+$$
 
 If capture sample rate differs from target sample rate (16 kHz), linear interpolation resampling is applied.
 
@@ -93,51 +93,51 @@ Voice-focus is enabled for microphone mode and disabled for loopback mode.
 
 Pre-emphasis/high-pass stage:
 
-\[
+$$
 y[n]=x[n]-\alpha x[n-1],\quad \alpha=0.95
-\]
+$$
 
 Adaptive RMS-driven noise floor update:
 
-- Initial \(\text{noise\_floor}=120\)
-- If \(\text{RMS}<1.35\cdot\text{noise\_floor}\):
+- Initial $\text{noise\_floor}=120$
+- If $\text{RMS}<1.35\cdot\text{noise\_floor}$:
 
-\[
+$$
 \text{noise\_floor}_{t+1}=0.985\,\text{noise\_floor}_t + 0.015\,\max(1,\text{RMS})
-\]
+$$
 
 - Else:
 
-\[
+$$
 \text{noise\_floor}_{t+1}=0.998\,\text{noise\_floor}_t + 0.002\,\max(1,\text{RMS})
-\]
+$$
 
 Gate threshold:
 
-\[
+$$
 \theta=\max(70,1.4\cdot\text{noise\_floor})
-\]
+$$
 
 Piecewise gain:
 
-- \(g=0.18\), if \(\text{RMS}<\theta\)
-- \(g=0.45\), if \(\theta\le\text{RMS}<1.3\theta\)
-- \(g=0.75\), if \(1.3\theta\le\text{RMS}<1.9\theta\)
-- \(g=1.0\), otherwise
+- $g=0.18$, if $\text{RMS}<\theta$
+- $g=0.45$, if $\theta\le\text{RMS}<1.3\theta$
+- $g=0.75$, if $1.3\theta\le\text{RMS}<1.9\theta$
+- $g=1.0$, otherwise
 
 Output clipping range:
 
-\[
+$$
 [-32768,32767] \text{ (int16)}
-\]
+$$
 
 ### 3.5 Pause/Silence Handling in Worker
 
 Energy proxy per chunk:
 
-\[
+$$
 E=\frac{1}{N}\sum_{n=1}^{N}|x[n]|
-\]
+$$
 
 Current thresholds:
 
@@ -147,9 +147,9 @@ Current thresholds:
 
 Audio level bar mapping:
 
-\[
+$$
 \text{level}=\text{clip}_{[0,100]}\left(\frac{E}{120}\right)
-\]
+$$
 
 ### 3.6 ASR Runtime Behavior
 
@@ -168,9 +168,9 @@ Audio level bar mapping:
 - Translation executor: single worker thread (max_workers = 1)
 - Cache key:
 
-\[
+$$
 (\ell_{src},\ell_{tgt},\text{text})
-\]
+$$
 
 - Offline safeguards:
   - ARGOS_CHUNK_TYPE=MINISBD
@@ -188,10 +188,10 @@ Incremental final emission logic removes prefix overlap versus previous final te
 
 ## 4. Computational Characteristics (Implementation-Level)
 
-- Audio queue operations: \(O(1)\) amortized push/pop.
-- Mono fold-down: \(O(N\cdot c)\) per chunk.
-- Linear interpolation resampling: \(O(N)\) for target sample count.
-- Voice-focus pass (pre-emphasis + RMS + gain): \(O(N)\) per chunk.
+- Audio queue operations: $O(1)$ amortized push/pop.
+- Mono fold-down: $O(N\cdot c)$ per chunk.
+- Linear interpolation resampling: $O(N)$ for target sample count.
+- Voice-focus pass (pre-emphasis + RMS + gain): $O(N)$ per chunk.
 - Translation scheduling: serialized single-worker execution to avoid out-of-order text churn.
 
 ## 5. Metrics for Research Paper Reporting
@@ -202,21 +202,21 @@ Use the following exact metric definitions when publishing results.
 
 Word Error Rate:
 
-\[
+$$
 \text{WER}=\frac{S+D+I}{N}
-\]
+$$
 
 Character Error Rate:
 
-\[
+$$
 \text{CER}=\frac{S_c+D_c+I_c}{N_c}
-\]
+$$
 
 where:
 
-- \(S,D,I\): substitutions, deletions, insertions at word level
-- \(S_c,D_c,I_c\): same at character level
-- \(N,N_c\): reference word/character counts
+- $S,D,I$: substitutions, deletions, insertions at word level
+- $S_c,D_c,I_c$: same at character level
+- $N,N_c$: reference word/character counts
 
 ### 5.2 Translation Metrics
 
@@ -227,9 +227,9 @@ where:
 
 Real-time factor:
 
-\[
+$$
 \text{RTF}=\frac{t_{\text{processing}}}{t_{\text{audio}}}
-\]
+$$
 
 Latency summary:
 
@@ -238,9 +238,9 @@ Latency summary:
 
 Confidence interval (95%):
 
-\[
+$$
 \bar{x} \pm 1.96\frac{s}{\sqrt{n}}
-\]
+$$
 
 ## 6. Reproducibility Checklist
 
@@ -269,5 +269,6 @@ python main.py
 - Vosk Hindi: https://alphacephei.com/vosk/models/vosk-model-hi-0.22.zip
 - Argos English-Hindi: https://argos-net.com/v1/translate-en_hi-1_1.argosmodel
 - Argos Hindi-English: https://argos-net.com/v1/translate-hi_en-1_1.argosmodel
+
 
 
