@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from threading import RLock
 
 from config import AppConfig
@@ -13,9 +14,14 @@ class TranslationEngine:
         self._lock = RLock()
         self._cached_modules: tuple[object, object] | None = None
         self._pair_translators: dict[tuple[str, str], object] = {}
+        if self.config.offline_mode:
+            os.environ["ARGOS_CHUNK_TYPE"] = "MINISBD"
+            os.environ["ARGOS_STANZA_AVAILABLE"] = "0"
 
-    @staticmethod
-    def _get_argos_modules():
+    def _get_argos_modules(self):
+        if self.config.offline_mode:
+            os.environ["ARGOS_CHUNK_TYPE"] = "MINISBD"
+            os.environ["ARGOS_STANZA_AVAILABLE"] = "0"
         try:
             package = importlib.import_module("argostranslate.package")
             translate = importlib.import_module("argostranslate.translate")
@@ -54,7 +60,13 @@ class TranslationEngine:
             self._pair_translators[pair] = translator
         return translator
 
-    def install_available_packages(self) -> None:
+    def install_available_packages(self, allow_online: bool = False) -> None:
+        if self.config.offline_mode and not allow_online:
+            raise RuntimeError(
+                "Offline mode is enabled: package index refresh is disabled because it requires internet. "
+                "Use local .argosmodel files with core/argos_setup.py instead."
+            )
+
         package, _translate = self._get_cached_argos_modules()
 
         package.update_package_index()
@@ -66,4 +78,13 @@ class TranslationEngine:
             return ""
 
         translator = self._get_pair_translator(from_lang=from_lang, to_lang=to_lang)
-        return translator.translate(text)
+        try:
+            return translator.translate(text)
+        except Exception as exc:
+            message = str(exc)
+            if "raw.githubusercontent.com" in message or "stanza-resources" in message:
+                raise RuntimeError(
+                    "Translation attempted to access online Stanza resources. "
+                    "Offline mode requires local Argos models only; restart the app after this update."
+                ) from exc
+            raise

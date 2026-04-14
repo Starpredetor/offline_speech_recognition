@@ -114,7 +114,6 @@ class RealtimeSTTEngine:
         if not supported:
             return
 
-        # Load multiple requested languages concurrently to reduce warmup time.
         if len(supported) == 1:
             self._get_recognizer(supported[0])
             return

@@ -28,25 +28,22 @@ python core/argos_setup.py
 
 ## Usage
 
-### CLI
+### Desktop App
 
 ```bash
 python main.py
 ```
 
-Options:
-1. Real-time transcription with optional overlay
-2. Transcribe audio file (WAV, MP3)
-3. Translate text
-4. Setup translation models
-5. Exit
+This launches the PySide6 desktop UI for realtime transcription and translation.
 
-### Web Interface
-
-```bash
-python app.py
-# Open http://localhost:5000
-```
+UI flow:
+- Startup splash screen preloads default speech models before the dashboard appears.
+- Split dashboard layout:
+  - Top bar: title, mode selector, theme toggle, settings, start/stop.
+  - Left panel: audio/language/model/overlay/window/translation controls.
+  - Right panel: live transcription + translation panes with clear/copy/save actions.
+  - Bottom status: state, model readiness, latency estimate, input level.
+- Overlay remains a separate transparent always-on-top subtitle window.
 
 ### Python API
 
@@ -73,7 +70,6 @@ ui/
   overlay.py          PySide6 subtitle overlay
 models/               Pre-trained models
 main.py              CLI entry point
-app.py               Flask web app
 config.py            Configuration
 ```
 
@@ -108,22 +104,16 @@ docker run -it -p 5000:5000 offline-speech:latest
 
 **Argos not working**
 - Run `python core/argos_setup.py`
+- Ensure both `.argosmodel` files exist in `models/argos/`
 
 **High latency**
 - Use specific language instead of auto-detection
 
-
-
-**CLI Mode:**
-- Option 1: Realtime mic transcription (Vosk)
-- Option 2: Translate text
-- Option 3: Setup translation models
-
-**Web GUI:**
-- Select source language (Auto/EN/HI)
-- Select target translation (None/EN/HI/Other)
-- Click "Start Mic" to listen and transcribe
-- Click "Setup Translation Models" to install offline translation
+**Desktop UI:**
+- Keep mode on `Real-time` for live capture.
+- Configure source/target language and audio source in the left panel.
+- Select a target window and click `Start`.
+- Read live text in the right panel and subtitles directly on overlay.
 
 ## Model Notes
 

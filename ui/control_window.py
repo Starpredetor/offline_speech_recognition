@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import threading
 import time
+import re
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional
 import numpy as np
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QPushButton, QTextEdit, QFrame, QSystemTrayIcon, QMenu, QApplication, QProgressBar
+    QComboBox, QPushButton, QTextEdit, QFrame, QSystemTrayIcon, QMenu, QApplication,
+    QProgressBar, QCheckBox, QSplitter, QToolButton, QSlider, QFileDialog, QMessageBox
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QRect
 from PySide6.QtGui import QFont
@@ -21,8 +23,9 @@ from core.window import WindowInfo
 
 class WindowAudioWorker(QThread):
     message_signal = Signal(str, str)
-    subtitle_signal = Signal(str)  # For overlay subtitle updates
-    clear_subtitle_signal = Signal()  # Signal to clear overlay (pause detected)
+    subtitle_signal = Signal(str)
+    clear_subtitle_signal = Signal()
+    audio_level_signal = Signal(int)
     finished_signal = Signal()
     error_signal = Signal(str)
 
@@ -33,6 +36,8 @@ class WindowAudioWorker(QThread):
         capture_mode: str,
         target_lang: str,
         target_window: Optional[WindowInfo],
+        preferred_mic_device_id: Optional[int] = None,
+        mic_voice_focus: bool = True,
     ):
         super().__init__()
         self.controller = controller
@@ -40,13 +45,14 @@ class WindowAudioWorker(QThread):
         self.capture_mode = capture_mode
         self.target_lang = target_lang
         self.target_window = target_window
+        self.preferred_mic_device_id = preferred_mic_device_id
+        self.mic_voice_focus = mic_voice_focus
         self._stop_event = threading.Event()
         self._attempt_stop_event: Optional[threading.Event] = None
 
     def run(self):
         translation_executor: ThreadPoolExecutor | None = None
         if self.target_lang != "none":
-            # Keep translation work off the hot audio callback path.
             translation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="caption-translate")
 
         try:
@@ -54,12 +60,23 @@ class WindowAudioWorker(QThread):
                 self.error_signal.emit("No window selected for audio capture")
                 return
 
-            safe_title = self.target_window.title.encode('ascii', errors='replace').decode('ascii')
-            print(f"[DEBUG] Worker thread started for: {safe_title}")
             self.message_signal.emit("status", f"🎤 Capturing audio from: {self.target_window.title}")
 
             system_audio_candidates = AudioInputHandler.get_system_audio_candidates() if self.capture_mode == "system" else []
             mic_candidates = AudioInputHandler.get_microphone_candidates() if self.capture_mode == "mic" else []
+            if self.capture_mode == "mic" and self.preferred_mic_device_id is not None and mic_candidates:
+                selected = next(
+                    (candidate for candidate in mic_candidates if candidate.get("device_id") == self.preferred_mic_device_id),
+                    None,
+                )
+                if selected is not None:
+                    mic_candidates = [selected]
+                else:
+                    self.message_signal.emit(
+                        "warning",
+                        "⚠ Selected microphone is unavailable. Falling back to best available microphone.",
+                    )
+
             if self.capture_mode == "system":
                 if system_audio_candidates:
                     best_candidate = system_audio_candidates[0]
@@ -88,13 +105,10 @@ class WindowAudioWorker(QThread):
                 preload_langs = self.controller.get_available_languages()
             else:
                 preload_langs = [self.src_lang]
-            print(f"[DEBUG] Preloading recognizers for: {preload_langs}")
             self.controller.realtime_stt.prepare_languages(preload_langs)
             preload_elapsed = time.perf_counter() - preload_started
-            print(f"[DEBUG] Recognizers ready in {preload_elapsed:.2f}s")
             self.message_signal.emit("status", f"✅ Speech model ready ({preload_elapsed:.1f}s)")
             if self._stop_event.is_set():
-                print("[DEBUG] Stop requested during model preload")
                 return
             chunk_count = 0
             last_preview = ""
@@ -105,64 +119,97 @@ class WindowAudioWorker(QThread):
             first_chunk_seen = False
             input_energy_threshold = 150.0
             active_device_name = "unknown"
-            attempt_stop_event = threading.Event()
-            attempt_started_at = time.monotonic()
-            attempt_chunk_count = 0
-            attempt_non_silent_count = 0
-            attempt_output_count = 0
-            attempt_failover_triggered = False
-            silent_chunk_count = 0  # Track consecutive silent chunks for pause detection
-            silence_threshold_chunks = 10  # ~0.8s of silence at 12ms per chunk triggers clear
+            silent_chunk_count = 0
+            silence_threshold_chunks = 10
             translation_cache: dict[tuple[str, str, str], str] = {}
             latest_translation_seq = 0
             latest_emitted_seq = 0
+            overlay_max_chars = 56
+            deferred_overlay_lines: list[str] = []
+            last_final_text_by_lang: dict[str, str] = {}
 
-            def chunk_text(text: str, max_length: int = 90, break_on_punctuation: bool = True) -> list[str]:
-                if len(text) <= max_length:
-                    return [text]
-                
-                chunks = []
-                if break_on_punctuation:
-                    # Split on common sentence endings first
-                    sentences = text.replace('? ', '?|').replace('! ', '!|').replace('. ', '.|').split('|')
-                    current_chunk = ""
-                    
-                    for sentence in sentences:
-                        test_chunk = (current_chunk + " " + sentence.strip()).strip()
-                        if len(test_chunk) <= max_length:
-                            current_chunk = test_chunk
+            def split_overlay_lines(
+                text: str,
+                max_length: int = overlay_max_chars,
+                max_words: int = 10,
+            ) -> list[str]:
+                compact = " ".join(text.split()).strip()
+                if not compact:
+                    return []
+
+                sentence_parts = [part.strip() for part in re.split(r"(?<=[.!?।])\s+", compact) if part.strip()]
+                if not sentence_parts:
+                    sentence_parts = [compact]
+
+                lines: list[str] = []
+                for sentence in sentence_parts:
+                    if len(sentence) <= max_length:
+                        words = sentence.split()
+                        if len(words) <= max_words:
+                            lines.append(sentence)
                         else:
-                            if current_chunk:
-                                chunks.append(current_chunk)
-                            current_chunk = sentence.strip()
-                    
-                    if current_chunk:
-                        chunks.append(current_chunk)
-                
-                if not chunks:
-                    # Fallback: break by word at max_length
-                    words = text.split()
-                    current_chunk = ""
-                    for word in words:
-                        if len(current_chunk) + len(word) + 1 <= max_length:
-                            current_chunk += word + " " if current_chunk else word
+                            for i in range(0, len(words), max_words):
+                                lines.append(" ".join(words[i : i + max_words]))
+                        continue
+
+                    words = sentence.split()
+                    if not words:
+                        continue
+
+                    current = words[0]
+                    for word in words[1:]:
+                        candidate = f"{current} {word}"
+                        if len(candidate) <= max_length:
+                            current = candidate
                         else:
-                            if current_chunk:
-                                chunks.append(current_chunk.strip())
-                            current_chunk = word
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                
-                return chunks if chunks else [text]
+                            lines.append(current)
+                            current = word
+                    if current:
+                        lines.append(current)
+
+                return lines
+
+            def extract_incremental_text(current: str, previous: str) -> str:
+                cur = " ".join(current.split()).strip()
+                prev = " ".join(previous.split()).strip()
+                if not cur:
+                    return ""
+                if not prev:
+                    return cur
+                if cur == prev:
+                    return ""
+                if cur.startswith(prev):
+                    return cur[len(prev):].strip(" ,.;:!?-\u0964")
+
+                prev_words = prev.split()
+                cur_words = cur.split()
+                max_overlap = min(len(prev_words), len(cur_words))
+                overlap = 0
+                for size in range(max_overlap, 0, -1):
+                    if prev_words[-size:] == cur_words[:size]:
+                        overlap = size
+                        break
+
+                incremental_words = cur_words[overlap:]
+                return " ".join(incremental_words).strip()
+
+            def enqueue_overlay_text(text: str) -> None:
+                lines = split_overlay_lines(text)
+                if lines:
+                    deferred_overlay_lines.extend(lines)
+
+            def emit_next_overlay_line() -> None:
+                if not deferred_overlay_lines:
+                    return
+                self.subtitle_signal.emit(deferred_overlay_lines.pop(0))
 
             def emit_transcript(text: str, detected_lang: str, is_final: bool) -> None:
                 nonlocal last_preview, silent_chunk_count
-                nonlocal partial_count, final_count, attempt_output_count
+                nonlocal partial_count, final_count
                 nonlocal latest_translation_seq, latest_emitted_seq
                 if not text.strip():
                     return
 
-                # For microphone mode, show only final recognition for cleaner, more accurate output.
                 if self.capture_mode == "mic" and not is_final:
                     return
 
@@ -171,33 +218,42 @@ class WindowAudioWorker(QThread):
                 if not is_final and source_text == last_preview:
                     return
 
-                attempt_output_count += 1
                 silent_chunk_count = 0  
+
+                resolved_target = None
+                should_translate_for_output = False
+                if is_final and translation_executor is not None:
+                    resolved_target = self.controller._resolve_target(detected_lang, self.target_lang)
+                    should_translate_for_output = bool(resolved_target and resolved_target != detected_lang)
 
                 if is_final:
                     final_count += 1
                     last_preview = ""
-                    print(f"[STT:{detected_lang}] {source_text}")
-                    self.subtitle_signal.emit(source_text)
-                    self.message_signal.emit("stt", f"[{detected_lang.upper()}] {source_text}")
+                    prior_text = last_final_text_by_lang.get(detected_lang, "")
+                    incremental_text = extract_incremental_text(source_text, prior_text)
+                    if not incremental_text:
+                        return
+
+                    last_final_text_by_lang[detected_lang] = source_text
+                    if not should_translate_for_output:
+                        enqueue_overlay_text(incremental_text)
+                        emit_next_overlay_line()
+                    for short_line in split_overlay_lines(incremental_text):
+                        self.message_signal.emit("stt", f"[{detected_lang.upper()}] {short_line}")
                 else:
                     partial_count += 1
                     last_preview = source_text
                     preview_text = f"{source_text} ..."
-                    print(f"[STT-PARTIAL:{detected_lang}] {source_text}")
                     self.message_signal.emit("stt_partial", f"[{detected_lang.upper()}] {preview_text}")
 
-                if translation_executor is None or not is_final:
-                    return
-
-                resolved_target = self.controller._resolve_target(detected_lang, self.target_lang)
-                if not resolved_target or resolved_target == detected_lang:
+                if translation_executor is None or not is_final or not should_translate_for_output or resolved_target is None:
                     return
 
                 cache_key = (detected_lang, resolved_target, source_text)
                 cached_translation = translation_cache.get(cache_key)
                 if cached_translation is not None:
-                    self.subtitle_signal.emit(cached_translation)
+                    enqueue_overlay_text(cached_translation)
+                    emit_next_overlay_line()
                     self.message_signal.emit("stt", f"[{resolved_target.upper()}] {cached_translation}")
                     return
 
@@ -246,40 +302,36 @@ class WindowAudioWorker(QThread):
                         return
 
                     translation_cache[(from_lang, to_lang, source)] = translated_text
-                    self.subtitle_signal.emit(translated_text)
+                    enqueue_overlay_text(translated_text)
+                    emit_next_overlay_line()
                     self.message_signal.emit("stt", f"[{to_lang.upper()}] {translated_text}")
 
                 translation_future.add_done_callback(_on_translation_done)
 
             def process_chunk(chunk: bytes) -> None:
                 nonlocal chunk_count, non_silent_chunk_count, last_debug_report, first_chunk_seen
-                nonlocal attempt_chunk_count, attempt_non_silent_count, attempt_failover_triggered
                 nonlocal silent_chunk_count
                 chunk_count += 1
-                attempt_chunk_count += 1
                 first_chunk_seen = True
 
                 pcm = np.frombuffer(chunk, dtype=np.int16)
                 if pcm.size > 0:
                     avg_energy = float(np.mean(np.abs(pcm)))
+                    level = int(max(0.0, min(100.0, avg_energy / 120.0)))
+                    self.audio_level_signal.emit(level)
                     if avg_energy >= input_energy_threshold:
                         non_silent_chunk_count += 1
-                        attempt_non_silent_count += 1
-                        silent_chunk_count = 0  # Reset silence counter on sound
+                        silent_chunk_count = 0
                     else:
                         silent_chunk_count += 1
-                        # Detect pause: accumulate silent chunks, flush on sustained silence
                         if silent_chunk_count >= silence_threshold_chunks:
-                            if chunk_count > 10:  # Avoid clearing too early
-                                print(f"[DEBUG] Pause detected ({silent_chunk_count} silent chunks)")
+                            if chunk_count > 10:
+                                deferred_overlay_lines.clear()
                                 self.clear_subtitle_signal.emit()
-                                silent_chunk_count = 0  # Reset after clearing
+                                silent_chunk_count = 0
                 else:
                     avg_energy = 0.0
                     silent_chunk_count += 1
-                
-                if chunk_count % 10 == 0:
-                    print(f"[DEBUG] Received audio chunk #{chunk_count}, size: {len(chunk)} bytes")
 
                 now = time.monotonic()
                 if now - last_debug_report >= 5.0:
@@ -306,7 +358,6 @@ class WindowAudioWorker(QThread):
                         )
                     last_debug_report = now
 
-                # Stick to selected source: do not auto-switch devices on silence.
                 
                 if self._stop_event.is_set():
                     if self._attempt_stop_event is not None:
@@ -335,13 +386,11 @@ class WindowAudioWorker(QThread):
                     state, text = self.controller.realtime_stt.accept_audio_chunk_detailed(chunk, lang=self.src_lang)
                     if state == "empty" or not text:
                         if chunk_count % 50 == 0:
-                            print(f"[DEBUG] No final transcription yet (chunk #{chunk_count})")
                         return
                     is_final = state == "final"
                     detected_lang = self.src_lang
 
                 if not text.strip():
-                    print(f"[DEBUG] Received empty text")
                     return
 
                 emit_transcript(text=text, detected_lang=detected_lang, is_final=is_final)
@@ -373,18 +422,12 @@ class WindowAudioWorker(QThread):
                     use_wasapi_loopback = bool(candidate.get("use_wasapi_loopback", False))
                     device_name = str(candidate.get("name", "audio device"))
                     active_device_name = device_name
-                    attempt_started_at = time.monotonic()
-                    attempt_chunk_count = 0
-                    attempt_non_silent_count = 0
-                    attempt_output_count = 0
-                    attempt_failover_triggered = False
                     attempt_stop_event = threading.Event()
                     self._attempt_stop_event = attempt_stop_event
                     self.message_signal.emit(
                         "status",
                         f"🎧 Trying device {attempt_index}/{len(candidate_devices)}: {device_name}",
                     )
-                    # Some WASAPI loopback devices reject specific channel counts; try safe fallbacks.
                     channel_options: list[int] = [stream_channels]
                     if use_wasapi_loopback:
                         channel_options.extend([2, 1])
@@ -399,20 +442,18 @@ class WindowAudioWorker(QThread):
                     stream_opened = False
                     for channel_value in deduped_channel_options:
                         try:
+                            chunk_duration_ms = 100 if use_wasapi_loopback or self.capture_mode == "system" else 140
                             audio_input = AudioInputHandler(
                                 sample_rate=self.controller.config.sample_rate,
                                 channels=channel_value,
                                 device_id=device_id,
                                 capture_sample_rate=capture_sample_rate,
                                 use_wasapi_loopback=use_wasapi_loopback,
+                                enable_voice_focus=self.mic_voice_focus and self.capture_mode == "mic",
                             )
-                            print(
-                                f"[DEBUG] Audio input initialized (attempt {attempt_index}, "
-                                f"device={device_id}, loopback={use_wasapi_loopback}, channels={channel_value})"
-                            )
-                            print(f"[DEBUG] Starting audio stream...")
                             audio_input.stream_chunks(
                                 callback=process_chunk,
+                                chunk_duration_ms=chunk_duration_ms,
                                 stop_event=attempt_stop_event,
                             )
                             stream_opened = True
@@ -431,16 +472,12 @@ class WindowAudioWorker(QThread):
                     if not stream_opened and open_error is not None:
                         raise open_error
 
-                    print(f"[DEBUG] Audio stream ended")
                     self._attempt_stop_event = None
-                    if attempt_failover_triggered:
-                        continue
                     last_error = None
                     break
                 except Exception as exc:
                     self._attempt_stop_event = None
                     last_error = exc
-                    print(f"[DEBUG] Stream attempt failed for device {candidate.get('device_id')}: {exc}")
                     retryable_errors = (
                         "Invalid device",
                         "Invalid sample rate",
@@ -472,14 +509,12 @@ class WindowAudioWorker(QThread):
                 ),
             )
         except Exception as e:
-            print(f"[DEBUG] Error in worker thread: {e}")
             import traceback
             traceback.print_exc()
             self.error_signal.emit(str(e))
         finally:
             if translation_executor is not None:
                 translation_executor.shutdown(wait=False, cancel_futures=True)
-            print(f"[DEBUG] Worker thread finished")
             self.finished_signal.emit()
 
     def stop(self):
@@ -518,17 +553,18 @@ class TranscriptionControlWindow(QMainWindow):
         self.is_running = False
         self.is_stopping = False
         self.models_ready = False
+        self.last_stt_event_ts: float | None = None
+        self.overlay_enabled = True
+        self.current_overlay_position = "Bottom"
         
-        # Detect system theme
         self.is_dark_mode = self.detect_dark_mode()
 
-        self.setWindowTitle("Window Audio Transcriber")
-        self.setGeometry(100, 100, 900, 700)
+        self.setWindowTitle("Offline Caption Studio")
+        self.setGeometry(90, 90, 1080, 760)
         self.setStyleSheet(self.get_stylesheet())
 
         self.init_ui()
         
-        # Setup system tray
         self.setup_tray()
         
         self.window_refresh_timer = QTimer()
@@ -537,21 +573,25 @@ class TranscriptionControlWindow(QMainWindow):
         
         self.refresh_windows()
         self.source_combo.currentTextChanged.connect(self.on_source_language_changed)
-        self.start_model_preload(self.get_preload_languages_for_source())
+        self.capture_combo.currentTextChanged.connect(self.on_capture_mode_changed)
+        self.source_combo.currentTextChanged.connect(self.update_selection_summary)
+        self.target_combo.currentTextChanged.connect(self.update_selection_summary)
+        self.refresh_microphone_devices()
+        self.on_capture_mode_changed(self.capture_combo.currentText())
+        self.on_translation_enabled_toggled(self.translation_enabled_checkbox.isChecked())
+        self.update_selection_summary()
 
     def detect_dark_mode(self) -> bool:
         app = QApplication.instance()
         if app:
             palette = app.palette()
             bg_color = palette.color(palette.ColorRole.Window)
-            # If background is dark (low brightness), it's dark mode
             return bg_color.lightness() < 128
         return False
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         
-        # Create tray menu
         tray_menu = QMenu(self)
         
         restore_action = tray_menu.addAction("Restore")
@@ -562,7 +602,6 @@ class TranscriptionControlWindow(QMainWindow):
         
         self.tray_icon.setContextMenu(tray_menu)
         
-        # Use a simple default icon (system icon)
         try:
             self.tray_icon.setIcon(QApplication.style().standardIcon(
                 QApplication.style().StandardPixmap.SP_MediaPlay
@@ -571,7 +610,7 @@ class TranscriptionControlWindow(QMainWindow):
             pass
         
         self.tray_icon.activated.connect(self.on_tray_activated)
-        self.tray_icon.setToolTip("Window Audio Transcriber - Ready")
+        self.tray_icon.setToolTip("Offline Caption Studio - Ready")
         self.tray_icon.show()
 
     def on_tray_activated(self, reason):
@@ -596,26 +635,33 @@ class TranscriptionControlWindow(QMainWindow):
         if self.is_dark_mode:
             return """
                 QMainWindow {
-                    background-color: #1e1e1e;
+                    background-color: #0f172a;
                 }
                 
                 QLabel {
-                    color: #e0e0e0;
+                    color: #e2e8f0;
+                }
+
+                QLabel#sectionHeader {
+                    color: #cbd5e1;
+                    font-size: 13px;
+                    font-weight: 700;
+                    letter-spacing: 0.4px;
                 }
                 
                 QComboBox {
-                    background-color: #2d2d2d;
-                    border: 2px solid #3d3d3d;
-                    border-radius: 6px;
-                    padding: 10px;
+                    background-color: #111827;
+                    border: 1px solid #334155;
+                    border-radius: 10px;
+                    padding: 9px 12px;
                     font-size: 14px;
-                    font-family: "Segoe UI";
-                    color: #e0e0e0;
-                    selection-background-color: #1d4ed8;
+                    font-family: "Bahnschrift";
+                    color: #e2e8f0;
+                    selection-background-color: #0369a1;
                 }
                 
                 QComboBox:hover {
-                    border: 2px solid #4a9eff;
+                    border: 1px solid #38bdf8;
                 }
                 
                 QComboBox::drop-down {
@@ -623,56 +669,121 @@ class TranscriptionControlWindow(QMainWindow):
                 }
                 
                 QComboBox QAbstractItemView {
-                    background-color: #2d2d2d;
-                    color: #e0e0e0;
-                    selection-background-color: #1d4ed8;
+                    background-color: #0b1220;
+                    color: #e2e8f0;
+                    selection-background-color: #0369a1;
+                }
+
+                QCheckBox {
+                    color: #cbd5e1;
+                    font-family: "Bahnschrift";
+                    spacing: 8px;
+                }
+
+                QCheckBox::indicator {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 4px;
+                    border: 1px solid #475569;
+                    background: #0b1220;
+                }
+
+                QCheckBox::indicator:checked {
+                    background: #0ea5e9;
+                    border: 1px solid #0ea5e9;
+                }
+
+                QPushButton {
+                    background-color: #1e293b;
+                    color: #e2e8f0;
+                    border: 1px solid #334155;
+                    border-radius: 10px;
+                    padding: 9px 14px;
+                    font-family: "Bahnschrift";
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+
+                QPushButton:hover {
+                    background-color: #334155;
+                    border-color: #475569;
+                }
+
+                QPushButton#primaryButton {
+                    background-color: #0ea5e9;
+                    color: #001018;
+                    border: 1px solid #38bdf8;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+
+                QPushButton#primaryButton:hover {
+                    background-color: #38bdf8;
                 }
                 
                 QTextEdit {
-                    background-color: #252525;
-                    border: 2px solid #3d3d3d;
-                    border-radius: 6px;
-                    padding: 10px;
-                    font-family: "Courier New";
+                    background-color: #0b1220;
+                    border: 1px solid #334155;
+                    border-radius: 12px;
+                    padding: 12px;
+                    font-family: "Consolas";
                     font-size: 12px;
-                    color: #e0e0e0;
+                    color: #cbd5e1;
                 }
                 
                 QStatusBar {
-                    background-color: #2d2d2d;
-                    border-top: 1px solid #3d3d3d;
-                    color: #e0e0e0;
+                    background-color: #0b1220;
+                    border-top: 1px solid #1f2937;
+                    color: #cbd5e1;
                 }
                 
                 QFrame {
-                    background-color: #2d2d2d;
-                    border: 1px solid #3d3d3d;
-                    border-radius: 8px;
+                    background-color: #111827;
+                    border: 1px solid #1f2937;
+                    border-radius: 14px;
+                }
+
+                QProgressBar {
+                    border: 1px solid #334155;
+                    border-radius: 5px;
+                    background: #0b1220;
+                }
+
+                QProgressBar::chunk {
+                    border-radius: 5px;
+                    background-color: #0ea5e9;
                 }
             """
         else:
             return """
                 QMainWindow {
-                    background-color: #f8f9fa;
+                    background-color: #eef2f6;
                 }
                 
                 QLabel {
-                    color: #2c3e50;
+                    color: #0f172a;
+                }
+
+                QLabel#sectionHeader {
+                    color: #334155;
+                    font-size: 13px;
+                    font-weight: 700;
+                    letter-spacing: 0.4px;
                 }
                 
                 QComboBox {
                     background-color: #ffffff;
-                    border: 2px solid #e0e0e0;
-                    border-radius: 6px;
-                    padding: 10px;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 10px;
+                    padding: 9px 12px;
                     font-size: 14px;
-                    font-family: "Segoe UI";
-                    color: #2c3e50;
-                    selection-background-color: #1d4ed8;
+                    font-family: "Bahnschrift";
+                    color: #0f172a;
+                    selection-background-color: #38bdf8;
                 }
                 
                 QComboBox:hover {
-                    border: 2px solid #1d4ed8;
+                    border: 1px solid #0ea5e9;
                 }
                 
                 QComboBox::drop-down {
@@ -681,30 +792,88 @@ class TranscriptionControlWindow(QMainWindow):
                 
                 QComboBox QAbstractItemView {
                     background-color: #ffffff;
-                    color: #2c3e50;
-                    selection-background-color: #1d4ed8;
+                    color: #0f172a;
+                    selection-background-color: #7dd3fc;
+                }
+
+                QCheckBox {
+                    color: #334155;
+                    font-family: "Bahnschrift";
+                    spacing: 8px;
+                }
+
+                QCheckBox::indicator {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 4px;
+                    border: 1px solid #94a3b8;
+                    background: #ffffff;
+                }
+
+                QCheckBox::indicator:checked {
+                    background: #0ea5e9;
+                    border: 1px solid #0ea5e9;
+                }
+
+                QPushButton {
+                    background-color: #f8fafc;
+                    color: #0f172a;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 10px;
+                    padding: 9px 14px;
+                    font-family: "Bahnschrift";
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+
+                QPushButton:hover {
+                    background-color: #e2e8f0;
+                    border-color: #94a3b8;
+                }
+
+                QPushButton#primaryButton {
+                    background-color: #0ea5e9;
+                    color: #001018;
+                    border: 1px solid #38bdf8;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+
+                QPushButton#primaryButton:hover {
+                    background-color: #38bdf8;
                 }
                 
                 QTextEdit {
-                    background-color: #f0f4f8;
-                    border: 2px solid #e0e0e0;
-                    border-radius: 6px;
-                    padding: 10px;
-                    font-family: "Courier New";
+                    background-color: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 12px;
+                    padding: 12px;
+                    font-family: "Consolas";
                     font-size: 12px;
-                    color: #2c3e50;
+                    color: #0f172a;
                 }
                 
                 QStatusBar {
                     background-color: #ffffff;
-                    border-top: 1px solid #e0e0e0;
-                    color: #2c3e50;
+                    border-top: 1px solid #cbd5e1;
+                    color: #334155;
                 }
                 
                 QFrame {
                     background-color: #ffffff;
-                    border: 1px solid #e0e0e0;
-                    border-radius: 8px;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 14px;
+                }
+
+                QProgressBar {
+                    border: 1px solid #cbd5e1;
+                    border-radius: 5px;
+                    background: #f8fafc;
+                }
+
+                QProgressBar::chunk {
+                    border-radius: 5px;
+                    background-color: #0ea5e9;
                 }
             """
 
@@ -712,203 +881,479 @@ class TranscriptionControlWindow(QMainWindow):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
-        layout.setSpacing(16)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
 
-        # Title
-        title = QLabel("🎙️ Window Audio Transcriber")
-        title_font = QFont("Segoe UI", 16)
+        top_bar = QFrame()
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(12, 10, 12, 10)
+        top_layout.setSpacing(10)
+
+        title = QLabel("Offline Speech Recognition")
+        title_font = QFont("Bahnschrift", 18)
         title_font.setBold(True)
         title.setFont(title_font)
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        top_layout.addWidget(title)
+        top_layout.addStretch()
 
-        # Settings Panel
-        settings_frame = QFrame()
-        self.settings_frame = settings_frame
-        settings_layout = QVBoxLayout(settings_frame)
-        settings_layout.setSpacing(12)
-        settings_layout.setContentsMargins(16, 16, 16, 16)
+        top_layout.addWidget(QLabel("Mode"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Real-time", "File transcription"])
+        self.mode_combo.setMinimumWidth(170)
+        self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
+        top_layout.addWidget(self.mode_combo)
 
-        lang_label = QLabel("Language Settings")
-        lang_font = QFont("Segoe UI", 11)
-        lang_font.setBold(True)
-        lang_label.setFont(lang_font)
-        settings_layout.addWidget(lang_label)
+        self.theme_toggle = QCheckBox("Dark Theme")
+        self.theme_toggle.setChecked(self.is_dark_mode)
+        self.theme_toggle.toggled.connect(self.on_theme_toggled)
+        top_layout.addWidget(self.theme_toggle)
 
-        source_row = QHBoxLayout()
-        source_row.addWidget(QLabel("Source Language:"))
-        self.source_combo = QComboBox()
-        self.source_combo.addItems(["Auto Detect 🌐", "English 🇬🇧", "Hindi 🇮🇳"])
-        self.source_combo.setMinimumHeight(35)
-        self.source_combo.setMinimumWidth(200)
-        lang_combo_font = QFont("Segoe UI", 13)
-        self.source_combo.setFont(lang_combo_font)
-        source_row.addWidget(self.source_combo)
-        source_row.addStretch()
-        settings_layout.addLayout(source_row)
+        self.settings_btn = QToolButton()
+        self.settings_btn.setText("Settings")
+        self.settings_btn.clicked.connect(self.open_settings_dialog)
+        top_layout.addWidget(self.settings_btn)
+
+        self.start_btn = QPushButton("Start")
+        self.start_btn.setObjectName("primaryButton")
+        self.start_btn.setMinimumHeight(40)
+        self.start_btn.setMinimumWidth(140)
+        self.start_btn.setFont(QFont("Bahnschrift", 12, QFont.Weight.Bold))
+        self.start_btn.clicked.connect(self.on_start_clicked)
+        self.start_btn.setEnabled(False)
+        top_layout.addWidget(self.start_btn)
+
+        layout.addWidget(top_bar)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        self.settings_frame = QFrame()
+        left_layout = QVBoxLayout(self.settings_frame)
+        left_layout.setSpacing(10)
+        left_layout.setContentsMargins(14, 14, 14, 14)
+
+        audio_header = QLabel("Audio Settings")
+        audio_header.setObjectName("sectionHeader")
+        left_layout.addWidget(audio_header)
 
         capture_row = QHBoxLayout()
         capture_row.addWidget(QLabel("Audio Source:"))
         self.capture_combo = QComboBox()
-        self.capture_combo.addItems(["Microphone 🎤", "System Audio 🔊"])
-        self.capture_combo.setMinimumHeight(35)
-        self.capture_combo.setMinimumWidth(200)
-        self.capture_combo.setFont(lang_combo_font)
+        self.capture_combo.addItems(["Microphone", "System Audio", "Virtual Device"])
+        self.capture_combo.setMinimumHeight(34)
+        self.capture_combo.setFont(QFont("Bahnschrift", 11))
         capture_row.addWidget(self.capture_combo)
-        capture_row.addStretch()
-        settings_layout.addLayout(capture_row)
+        left_layout.addLayout(capture_row)
 
-        device_tools_row = QHBoxLayout()
-        self.detect_device_btn = QPushButton("Detect Current Device")
-        self.detect_device_btn.setMinimumHeight(35)
-        self.detect_device_btn.setFont(QFont("Segoe UI", 10))
-        self.detect_device_btn.clicked.connect(self.detect_current_audio_device)
-        device_tools_row.addWidget(self.detect_device_btn)
+        mic_row = QHBoxLayout()
+        self.mic_label = QLabel("Input Device:")
+        mic_row.addWidget(self.mic_label)
+        self.mic_combo = QComboBox()
+        self.mic_combo.setMinimumHeight(34)
+        self.mic_combo.setFont(QFont("Bahnschrift", 11))
+        mic_row.addWidget(self.mic_combo)
+        self.refresh_mic_btn = QPushButton("Refresh")
+        self.refresh_mic_btn.clicked.connect(self.refresh_microphone_devices)
+        mic_row.addWidget(self.refresh_mic_btn)
+        left_layout.addLayout(mic_row)
 
-        self.launch_overlay_btn = QPushButton("Launch Overlay")
-        self.launch_overlay_btn.setMinimumHeight(35)
-        self.launch_overlay_btn.setFont(QFont("Segoe UI", 10))
-        self.launch_overlay_btn.clicked.connect(self.launch_overlay)
-        device_tools_row.addWidget(self.launch_overlay_btn)
+        self.voice_focus_checkbox = QCheckBox("Noise suppression / voice focus")
+        self.voice_focus_checkbox.setChecked(True)
+        left_layout.addWidget(self.voice_focus_checkbox)
 
-        self.close_overlay_btn = QPushButton("Close Overlay")
-        self.close_overlay_btn.setMinimumHeight(35)
-        self.close_overlay_btn.setFont(QFont("Segoe UI", 10))
-        self.close_overlay_btn.clicked.connect(self.close_overlay)
-        device_tools_row.addWidget(self.close_overlay_btn)
-        device_tools_row.addStretch()
-        settings_layout.addLayout(device_tools_row)
+        meter_row = QHBoxLayout()
+        meter_row.addWidget(QLabel("Input Level:"))
+        self.audio_level_bar = QProgressBar()
+        self.audio_level_bar.setRange(0, 100)
+        self.audio_level_bar.setValue(0)
+        self.audio_level_bar.setTextVisible(False)
+        meter_row.addWidget(self.audio_level_bar)
+        left_layout.addLayout(meter_row)
+
+        language_header = QLabel("Language Settings")
+        language_header.setObjectName("sectionHeader")
+        left_layout.addWidget(language_header)
+
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Source:"))
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["Auto Detect", "English", "Hindi"])
+        self.source_combo.setMinimumHeight(34)
+        self.source_combo.setFont(QFont("Bahnschrift", 11))
+        source_row.addWidget(self.source_combo)
+        left_layout.addLayout(source_row)
 
         target_row = QHBoxLayout()
-        target_row.addWidget(QLabel("Translation:"))
+        target_row.addWidget(QLabel("Target:"))
         self.target_combo = QComboBox()
-        self.target_combo.addItems(["None", "English", "Hindi", "Other"])
-        self.target_combo.setMinimumHeight(35)
-        self.target_combo.setMinimumWidth(200)
-        self.target_combo.setFont(lang_combo_font)
+        self.target_combo.addItems(["None", "English", "Hindi", "Auto Opposite"])
+        self.target_combo.setMinimumHeight(34)
+        self.target_combo.setFont(QFont("Bahnschrift", 11))
+        self.target_combo.currentTextChanged.connect(self.on_target_language_changed)
         target_row.addWidget(self.target_combo)
-        target_row.addStretch()
-        settings_layout.addLayout(target_row)
+        left_layout.addLayout(target_row)
+
+        self.selection_summary = QLabel("")
+        self.selection_summary.setFont(QFont("Bahnschrift", 10, QFont.Weight.Bold))
+        self.selection_summary.setStyleSheet("color: #0ea5e9;")
+        left_layout.addWidget(self.selection_summary)
+
+        model_header = QLabel("Model Settings")
+        model_header.setObjectName("sectionHeader")
+        left_layout.addWidget(model_header)
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("STT Engine:"))
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItems(["Vosk (fast)"])
+        self.engine_combo.setEnabled(False)
+        model_row.addWidget(self.engine_combo)
+        left_layout.addLayout(model_row)
+
+        whisper_row = QHBoxLayout()
+        whisper_row.addWidget(QLabel("Whisper Model:"))
+        self.whisper_model_combo = QComboBox()
+        self.whisper_model_combo.addItems(["Unavailable (removed)"])
+        self.whisper_model_combo.setEnabled(False)
+        whisper_row.addWidget(self.whisper_model_combo)
+        left_layout.addLayout(whisper_row)
 
         preload_row = QHBoxLayout()
         preload_row.addWidget(QLabel("Speech Models:"))
         self.model_status = QLabel("Loading...")
-        self.model_status.setFont(QFont("Segoe UI", 10))
         self.model_status.setStyleSheet("color: #f59e0b; font-weight: bold;")
         preload_row.addWidget(self.model_status)
-        self.preload_btn = QPushButton("Load Models")
-        self.preload_btn.setMinimumHeight(35)
-        self.preload_btn.setFont(QFont("Segoe UI", 10))
+        self.preload_btn = QPushButton("Reload")
         self.preload_btn.clicked.connect(self.start_model_preload)
         preload_row.addWidget(self.preload_btn)
-        preload_row.addStretch()
-        settings_layout.addLayout(preload_row)
+        left_layout.addLayout(preload_row)
 
-        window_label_text = QLabel("Select Window for Audio Capture:")
-        window_label_text.setFont(QFont("Segoe UI", 10))
-        settings_layout.addWidget(window_label_text)
+        overlay_header = QLabel("Overlay Settings")
+        overlay_header.setObjectName("sectionHeader")
+        left_layout.addWidget(overlay_header)
+
+        self.overlay_enabled_checkbox = QCheckBox("Enable overlay")
+        self.overlay_enabled_checkbox.setChecked(True)
+        self.overlay_enabled_checkbox.toggled.connect(self.on_overlay_enabled_changed)
+        left_layout.addWidget(self.overlay_enabled_checkbox)
+
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Opacity"))
+        self.overlay_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.overlay_opacity_slider.setRange(35, 100)
+        self.overlay_opacity_slider.setValue(90)
+        self.overlay_opacity_slider.valueChanged.connect(self.on_overlay_opacity_changed)
+        opacity_row.addWidget(self.overlay_opacity_slider)
+        left_layout.addLayout(opacity_row)
+
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Font Size"))
+        self.overlay_font_slider = QSlider(Qt.Orientation.Horizontal)
+        self.overlay_font_slider.setRange(14, 42)
+        self.overlay_font_slider.setValue(24)
+        self.overlay_font_slider.valueChanged.connect(self.on_overlay_font_size_changed)
+        font_row.addWidget(self.overlay_font_slider)
+        left_layout.addLayout(font_row)
+
+        position_row = QHBoxLayout()
+        position_row.addWidget(QLabel("Position"))
+        self.overlay_position_combo = QComboBox()
+        self.overlay_position_combo.addItems(["Top", "Bottom", "Custom"])
+        self.overlay_position_combo.setCurrentText("Bottom")
+        self.overlay_position_combo.currentTextChanged.connect(self.on_overlay_position_changed)
+        position_row.addWidget(self.overlay_position_combo)
+        left_layout.addLayout(position_row)
+
+        self.overlay_clickthrough_checkbox = QCheckBox("Click-through overlay")
+        self.overlay_clickthrough_checkbox.toggled.connect(self.on_overlay_clickthrough_changed)
+        left_layout.addWidget(self.overlay_clickthrough_checkbox)
+
+        attach_header = QLabel("Window Attachment")
+        attach_header.setObjectName("sectionHeader")
+        left_layout.addWidget(attach_header)
+
+        self.window_label_text = QLabel("Target Window")
+        left_layout.addWidget(self.window_label_text)
 
         self.window_combo = QComboBox()
-        self.window_combo.setMinimumHeight(35)
-        window_combo_font = QFont("Segoe UI", 13)
-        self.window_combo.setFont(window_combo_font)
-        settings_layout.addWidget(self.window_combo)
+        self.window_combo.setMinimumHeight(34)
+        self.window_combo.setFont(QFont("Bahnschrift", 11))
+        left_layout.addWidget(self.window_combo)
 
-        layout.addWidget(settings_frame)
+        attach_row = QHBoxLayout()
+        self.refresh_windows_btn = QPushButton("Refresh Windows")
+        self.refresh_windows_btn.clicked.connect(self.refresh_windows)
+        attach_row.addWidget(self.refresh_windows_btn)
+        self.detect_device_btn = QPushButton("Detect Device")
+        self.detect_device_btn.clicked.connect(self.detect_current_audio_device)
+        attach_row.addWidget(self.detect_device_btn)
+        left_layout.addLayout(attach_row)
 
-        # Controls Panel
-        controls_frame = QFrame()
-        controls_layout = QVBoxLayout(controls_frame)
-        controls_layout.setSpacing(12)
-        controls_layout.setContentsMargins(16, 16, 16, 16)
+        self.launch_overlay_btn = QPushButton("Attach Overlay")
+        self.launch_overlay_btn.clicked.connect(self.launch_overlay)
+        left_layout.addWidget(self.launch_overlay_btn)
 
-        status_label = QLabel("Status")
-        status_font = QFont("Segoe UI", 11)
-        status_font.setBold(True)
-        status_label.setFont(status_font)
-        controls_layout.addWidget(status_label)
+        self.close_overlay_btn = QPushButton("Detach Overlay")
+        self.close_overlay_btn.clicked.connect(self.close_overlay)
+        left_layout.addWidget(self.close_overlay_btn)
 
-        self.status_display = QLabel("✓ Ready - Select a window to start")
-        status_display_font = QFont("Segoe UI", 10)
-        self.status_display.setFont(status_display_font)
+        trans_header = QLabel("Translation Options")
+        trans_header.setObjectName("sectionHeader")
+        left_layout.addWidget(trans_header)
+
+        self.translation_enabled_checkbox = QCheckBox("Enable translation")
+        self.translation_enabled_checkbox.setChecked(True)
+        self.translation_enabled_checkbox.toggled.connect(self.on_translation_enabled_toggled)
+        left_layout.addWidget(self.translation_enabled_checkbox)
+
+        pivot_row = QHBoxLayout()
+        pivot_row.addWidget(QLabel("Pivot mode:"))
+        self.pivot_combo = QComboBox()
+        self.pivot_combo.addItems(["Direct", "Via English"])
+        self.pivot_combo.setEnabled(False)
+        pivot_row.addWidget(self.pivot_combo)
+        left_layout.addLayout(pivot_row)
+
+        left_layout.addStretch()
+
+        right_frame = QFrame()
+        right_layout = QVBoxLayout(right_frame)
+        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(14, 14, 14, 14)
+
+        right_header = QLabel("Live Output")
+        right_header.setObjectName("sectionHeader")
+        right_layout.addWidget(right_header)
+
+        self.timestamp_checkbox = QCheckBox("Show timestamps")
+        self.timestamp_checkbox.setChecked(True)
+        right_layout.addWidget(self.timestamp_checkbox)
+
+        right_layout.addWidget(QLabel("Transcription"))
+        self.transcription_text = QTextEdit()
+        self.transcription_text.setReadOnly(True)
+        self.transcription_text.setMinimumHeight(180)
+        self.transcription_text.setFont(QFont("Consolas", 10))
+        right_layout.addWidget(self.transcription_text)
+
+        right_layout.addWidget(QLabel("Translation"))
+        self.translation_text = QTextEdit()
+        self.translation_text.setReadOnly(True)
+        self.translation_text.setMinimumHeight(180)
+        self.translation_text.setFont(QFont("Consolas", 10))
+        right_layout.addWidget(self.translation_text)
+
+        controls_row = QHBoxLayout()
+        self.clear_output_btn = QPushButton("Clear")
+        self.clear_output_btn.clicked.connect(self.clear_output)
+        controls_row.addWidget(self.clear_output_btn)
+        self.copy_output_btn = QPushButton("Copy")
+        self.copy_output_btn.clicked.connect(self.copy_output)
+        controls_row.addWidget(self.copy_output_btn)
+        self.save_output_btn = QPushButton("Save")
+        self.save_output_btn.clicked.connect(self.save_output)
+        controls_row.addWidget(self.save_output_btn)
+        controls_row.addStretch()
+        right_layout.addLayout(controls_row)
+
+        right_layout.addWidget(QLabel("Events"))
+        self.output_text = QTextEdit()
+        self.output_text.setReadOnly(True)
+        self.output_text.setMinimumHeight(120)
+        self.output_text.setFont(QFont("Consolas", 9))
+        right_layout.addWidget(self.output_text)
+
+        splitter.addWidget(self.settings_frame)
+        splitter.addWidget(right_frame)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([460, 680])
+        layout.addWidget(splitter, 1)
+
+        session_frame = QFrame()
+        session_layout = QVBoxLayout(session_frame)
+        session_layout.setContentsMargins(12, 10, 12, 10)
+        session_layout.setSpacing(8)
+
+        self.status_display = QLabel("Ready. Select a source window to begin.")
+        self.status_display.setFont(QFont("Bahnschrift", 10))
         self.status_display.setStyleSheet("color: #10b981; font-weight: bold;")
-        controls_layout.addWidget(self.status_display)
+        session_layout.addWidget(self.status_display)
 
         self.loading_bar = QProgressBar()
         self.loading_bar.setRange(0, 0)
         self.loading_bar.setTextVisible(False)
-        self.loading_bar.setMinimumHeight(10)
+        self.loading_bar.setMinimumHeight(8)
         self.loading_bar.hide()
-        controls_layout.addWidget(self.loading_bar)
+        session_layout.addWidget(self.loading_bar)
+        layout.addWidget(session_frame)
 
-        controls_layout.addSpacing(8)
+        self.bottom_state_label = QLabel("Idle")
+        self.bottom_model_label = QLabel("Model: Vosk")
+        self.bottom_latency_label = QLabel("Latency: -- ms")
+        self.bottom_audio_label = QLabel("Input: 0%")
+        self.bottom_alert_label = QLabel("OK")
+        self.statusBar().addPermanentWidget(self.bottom_state_label)
+        self.statusBar().addPermanentWidget(self.bottom_model_label)
+        self.statusBar().addPermanentWidget(self.bottom_latency_label)
+        self.statusBar().addPermanentWidget(self.bottom_audio_label)
+        self.statusBar().addPermanentWidget(self.bottom_alert_label)
+        self.statusBar().showMessage("Ready")
 
-        button_layout = QHBoxLayout()
-        
-        self.start_btn = QPushButton("   ▶ START TRANSCRIPTION   ")
-        self.start_btn.setMinimumHeight(45)
-        start_btn_font = QFont("Segoe UI", 11)
-        start_btn_font.setBold(True)
-        self.start_btn.setFont(start_btn_font)
-        self.start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1d4ed8;
-                color: white;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #1e40af;
-            }
-            QPushButton:pressed {
-                background-color: #1e3a8a;
-            }
-        """)
-        self.start_btn.clicked.connect(self.on_start_clicked)
-        self.start_btn.setEnabled(False)
-        button_layout.addWidget(self.start_btn)
-        
-        controls_layout.addLayout(button_layout)
-        layout.addWidget(controls_frame)
+    def update_selection_summary(self):
+        source = self.source_combo.currentText()
+        target = self.target_combo.currentText()
+        mode = self.mode_combo.currentText() if hasattr(self, "mode_combo") else "Real-time"
+        self.selection_summary.setText(f"Mode: {mode} | Language Flow: {source} -> {target}")
 
-        # Output Panel
-        output_frame = QFrame()
-        output_layout = QVBoxLayout(output_frame)
-        output_layout.setSpacing(8)
-        output_layout.setContentsMargins(16, 16, 16, 16)
+    def on_mode_changed(self, mode_text: str):
+        if mode_text == "File transcription":
+            self.log_output("warning", "File transcription UI is reserved for a future offline module.")
+            self.statusBar().showMessage("File transcription is not available yet")
+        self.update_selection_summary()
 
-        output_label = QLabel("📝 Live Transcription")
-        output_font = QFont("Segoe UI", 11)
-        output_font.setBold(True)
-        output_label.setFont(output_font)
-        output_layout.addWidget(output_label)
+    def on_theme_toggled(self, checked: bool):
+        self.is_dark_mode = checked
+        self.setStyleSheet(self.get_stylesheet())
 
-        self.output_text = QTextEdit()
-        self.output_text.setReadOnly(True)
-        self.output_text.setMinimumHeight(250)
-        output_text_font = QFont("Courier New", 10)
-        self.output_text.setFont(output_text_font)
-        self.output_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #f0f4f8;
-                border: 2px solid #e0e0e0;
-                border-radius: 6px;
-                padding: 10px;
-            }
-        """)
-        output_layout.addWidget(self.output_text)
+    def open_settings_dialog(self):
+        QMessageBox.information(
+            self,
+            "Settings",
+            "Settings modal placeholder:\n\n"
+            "- Model paths\n"
+            "- Performance tuning\n"
+            "- Default language\n"
+            "- GPU toggle (future)",
+        )
 
-        layout.addWidget(output_frame)
+    def on_overlay_enabled_changed(self, checked: bool):
+        self.overlay_enabled = checked
+        if not checked:
+            self.close_overlay()
 
-        # Status Bar
-        self.statusBar().showMessage("Ready to start transcription")
-        self.statusBar().setStyleSheet("""
-            QStatusBar {
-                background-color: #ffffff;
-                border-top: 1px solid #e0e0e0;
-            }
-        """)
+    def on_overlay_opacity_changed(self, value: int):
+        opacity = max(0.35, min(1.0, value / 100.0))
+        self.controller.overlay_manager.config.opacity = opacity
+        if self.controller.overlay_manager.overlay:
+            self.controller.overlay_manager.overlay.setWindowOpacity(opacity)
+
+    def on_overlay_font_size_changed(self, value: int):
+        self.controller.overlay_manager.config.font_size = max(8, int(value))
+        if self.controller.overlay_manager.overlay:
+            self.controller.overlay_manager.overlay.update()
+
+    def on_overlay_position_changed(self, value: str):
+        self.current_overlay_position = value
+        self.apply_overlay_position()
+
+    def on_overlay_clickthrough_changed(self, checked: bool):
+        overlay = self.controller.overlay_manager.overlay
+        if overlay:
+            overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, checked)
+
+    def on_translation_enabled_toggled(self, checked: bool):
+        self.target_combo.setEnabled(not self.is_running)
+        self.pivot_combo.setEnabled(checked)
+        if not checked:
+            self.target_combo.setCurrentText("None")
+        elif self.target_combo.currentText() == "None":
+            self.target_combo.setCurrentText("Auto Opposite")
+        self.update_selection_summary()
+
+    def on_target_language_changed(self, value: str):
+        should_enable = value != "None"
+        if self.translation_enabled_checkbox.isChecked() != should_enable:
+            self.translation_enabled_checkbox.blockSignals(True)
+            self.translation_enabled_checkbox.setChecked(should_enable)
+            self.translation_enabled_checkbox.blockSignals(False)
+            self.pivot_combo.setEnabled(should_enable)
+        self.update_selection_summary()
+
+    def clear_output(self):
+        self.transcription_text.clear()
+        self.translation_text.clear()
+        self.output_text.clear()
+
+    def copy_output(self):
+        combined = (
+            "Transcription\n"
+            + self.transcription_text.toPlainText()
+            + "\n\nTranslation\n"
+            + self.translation_text.toPlainText()
+        )
+        QApplication.clipboard().setText(combined)
+        self.statusBar().showMessage("Live output copied to clipboard", 1800)
+
+    def save_output(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Transcript",
+            "transcript.txt",
+            "Text Files (*.txt);;All Files (*)",
+        )
+        if not path:
+            return
+
+        content = (
+            "Transcription\n"
+            + self.transcription_text.toPlainText()
+            + "\n\nTranslation\n"
+            + self.translation_text.toPlainText()
+            + "\n\nEvents\n"
+            + self.output_text.toPlainText()
+        )
+        with open(path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(content)
+        self.statusBar().showMessage(f"Saved transcript to {path}", 2200)
+
+    def apply_overlay_position(self):
+        overlay = self.controller.overlay_manager.overlay
+        target_window = self.window_combo.currentData()
+        if overlay is None or target_window is None:
+            return
+
+        if self.current_overlay_position == "Custom":
+            return
+
+        rect = QRect(target_window.x, target_window.y, target_window.width, target_window.height)
+        width = overlay.width()
+        height = overlay.height()
+        x = rect.x() + max(20, (rect.width() - width) // 2)
+        if self.current_overlay_position == "Top":
+            y = rect.y() + 24
+        else:
+            y = rect.y() + max(20, rect.height() - height - 48)
+        overlay.move(x, y)
+
+    def preload_default_models_blocking(self) -> tuple[bool, str]:
+        languages = self.get_preload_languages_for_source()
+        languages = [lang for lang in languages if lang in {"en", "hi"}]
+        if not languages:
+            self.models_ready = False
+            self.start_btn.setEnabled(False)
+            return False, "No speech models available"
+
+        try:
+            self.set_loading_state(True, "Loading default speech models...")
+            QApplication.processEvents()
+            started = time.perf_counter()
+            self.controller.realtime_stt.prepare_languages(languages)
+            elapsed = time.perf_counter() - started
+
+            self.models_ready = True
+            self.start_btn.setEnabled(True)
+            self.set_loading_state(False)
+            self.statusBar().showMessage("Models ready")
+            self.bottom_model_label.setText("Model: Vosk (ready)")
+            return True, f"Models ready ({elapsed:.1f}s)"
+        except Exception as exc:
+            self.models_ready = False
+            self.start_btn.setEnabled(False)
+            self.set_loading_state(False)
+            self.statusBar().showMessage("Model load failed")
+            self.bottom_model_label.setText("Model: load failed")
+            return False, f"Model load failed: {exc}"
 
     def refresh_windows(self):
         windows = self.controller.window_tracker.get_available_windows()
@@ -952,11 +1397,40 @@ class TranscriptionControlWindow(QMainWindow):
     def get_preload_languages_for_source(self) -> list[str]:
         available = self.controller.get_available_languages()
         source_map = {
-            "Auto Detect 🌐": ["en"] if "en" in available else available[:1],
-            "English 🇬🇧": ["en"] if "en" in available else [],
-            "Hindi 🇮🇳": ["hi"] if "hi" in available else [],
+            "Auto Detect": ["en"] if "en" in available else available[:1],
+            "English": ["en"] if "en" in available else [],
+            "Hindi": ["hi"] if "hi" in available else [],
         }
         return source_map.get(self.source_combo.currentText(), ["en"] if "en" in available else available[:1])
+
+    def refresh_microphone_devices(self):
+        previous_device_id = self.mic_combo.currentData() if hasattr(self, "mic_combo") else None
+        candidates = AudioInputHandler.get_microphone_candidates()
+
+        self.mic_combo.blockSignals(True)
+        self.mic_combo.clear()
+        self.mic_combo.addItem("Auto (System default)", None)
+
+        selected_index = 0
+        for candidate in candidates:
+            device_id = candidate.get("device_id")
+            display_name = str(candidate.get("name", "Microphone"))
+            self.mic_combo.addItem(f"{display_name} (id={device_id})", device_id)
+            if previous_device_id is not None and device_id == previous_device_id:
+                selected_index = self.mic_combo.count() - 1
+
+        self.mic_combo.setCurrentIndex(selected_index)
+        self.mic_combo.blockSignals(False)
+
+    def on_capture_mode_changed(self, text: str):
+        mic_mode = text in {"Microphone", "Virtual Device"}
+        self.mic_label.setVisible(mic_mode)
+        self.mic_combo.setVisible(mic_mode)
+        self.refresh_mic_btn.setVisible(mic_mode)
+        self.voice_focus_checkbox.setVisible(mic_mode)
+        self.mic_combo.setEnabled(mic_mode and not self.is_running)
+        self.refresh_mic_btn.setEnabled(mic_mode and not self.is_running)
+        self.voice_focus_checkbox.setEnabled(mic_mode and not self.is_running)
 
     def on_source_language_changed(self, _text: str):
         languages = self.get_preload_languages_for_source()
@@ -982,7 +1456,6 @@ class TranscriptionControlWindow(QMainWindow):
 
     def start_model_preload(self, languages: list[str] | None = None):
         languages = languages or self.get_preload_languages_for_source()
-        languages = [lang for lang in languages if lang in {"en", "hi"}]
         if self.preload_thread and self.preload_thread.isRunning():
             return
         if not languages:
@@ -990,7 +1463,6 @@ class TranscriptionControlWindow(QMainWindow):
         if all(self.controller.realtime_stt.is_language_ready(lang) for lang in languages):
             self.models_ready = True
             self.start_btn.setEnabled(not self.is_running and not self.is_stopping)
-            langs_text = ", ".join(lang.upper() for lang in languages)
             self.model_status.setText(f"Ready ({langs_text})")
             self.model_status.setStyleSheet("color: #10b981; font-weight: bold;")
             self.set_loading_state(False)
@@ -1020,6 +1492,7 @@ class TranscriptionControlWindow(QMainWindow):
         self.model_status.setText(f"Ready {langs_text} ({elapsed:.1f}s)")
         self.model_status.setStyleSheet("color: #10b981; font-weight: bold;")
         self.statusBar().showMessage("Speech models ready")
+        self.bottom_model_label.setText("Model: Vosk (ready)")
         self.log_output("status", f"✅ Speech models ready ({elapsed:.1f}s) - {langs_text}")
         self.preload_thread = None
 
@@ -1031,37 +1504,41 @@ class TranscriptionControlWindow(QMainWindow):
         self.model_status.setText("Load failed")
         self.model_status.setStyleSheet("color: #ef4444; font-weight: bold;")
         self.statusBar().showMessage("Speech model load failed")
+        self.bottom_model_label.setText("Model: load failed")
         self.log_output("error", f"❌ Speech model load failed: {error_msg}")
         self.preload_thread = None
 
-    def get_settings(self) -> tuple[str, str, str, Optional[WindowInfo]]:
+    def get_settings(self) -> tuple[str, str, str, Optional[WindowInfo], Optional[int], bool]:
         source_map = {
-            "Auto Detect 🌐": "auto",
-            "English 🇬🇧": "en",
-            "Hindi 🇮🇳": "hi"
+            "Auto Detect": "auto",
+            "English": "en",
+            "Hindi": "hi"
         }
         capture_map = {
-            "Microphone 🎤": "mic",
-            "System Audio 🔊": "system",
+            "Microphone": "mic",
+            "System Audio": "system",
+            "Virtual Device": "mic",
         }
         target_map = {
             "None": "none",
             "English": "en",
             "Hindi": "hi",
-            "Other": "other",
+            "Auto Opposite": "other",
         }
         src_lang = source_map.get(self.source_combo.currentText(), "auto")
         capture_mode = capture_map.get(self.capture_combo.currentText(), "mic")
         target_lang = target_map.get(self.target_combo.currentText(), "none")
         target_window = self.window_combo.currentData()
-        return src_lang, capture_mode, target_lang, target_window
+        preferred_mic_device_id = self.mic_combo.currentData() if capture_mode == "mic" else None
+        mic_voice_focus = bool(self.voice_focus_checkbox.isChecked()) if capture_mode == "mic" else False
+        return src_lang, capture_mode, target_lang, target_window, preferred_mic_device_id, mic_voice_focus
 
     def detect_current_audio_device(self):
         default_in_id, default_out_id = AudioInputHandler.get_default_device_ids()
         devices = AudioInputHandler.get_all_devices()
 
         capture_mode = self.capture_combo.currentText()
-        if capture_mode == "Microphone 🎤":
+        if capture_mode in {"Microphone", "Virtual Device"}:
             if default_in_id is None:
                 mic_candidates = AudioInputHandler.get_microphone_candidates()
                 if mic_candidates:
@@ -1099,12 +1576,20 @@ class TranscriptionControlWindow(QMainWindow):
             self.log_output("warning", "⚠ Default output device index is out of range.")
 
     def launch_overlay(self):
+        if not self.overlay_enabled:
+            self.log_output("status", "Overlay disabled in settings.")
+            return
+
         target_window = self.window_combo.currentData()
         try:
             self.controller.overlay_manager.initialize()
             if target_window:
                 target_rect = QRect(target_window.x, target_window.y, target_window.width, target_window.height)
                 self.controller.overlay_manager.set_target_window(target_rect)
+            self.on_overlay_opacity_changed(self.overlay_opacity_slider.value())
+            self.on_overlay_font_size_changed(self.overlay_font_slider.value())
+            self.on_overlay_clickthrough_changed(self.overlay_clickthrough_checkbox.isChecked())
+            self.apply_overlay_position()
             self.controller.overlay_manager.set_subtitle("Overlay ready")
             self.controller.overlay_manager.show()
             self.log_output("status", "🪟 Overlay launched.")
@@ -1126,7 +1611,12 @@ class TranscriptionControlWindow(QMainWindow):
             self.start_transcription()
 
     def start_transcription(self):
-        src_lang, capture_mode, target_lang, target_window = self.get_settings()
+        if self.mode_combo.currentText() != "Real-time":
+            self.log_output("warning", "File transcription mode is not implemented yet.")
+            self.statusBar().showMessage("Switch mode to Real-time", 2000)
+            return
+
+        src_lang, capture_mode, target_lang, target_window, preferred_mic_device_id, mic_voice_focus = self.get_settings()
 
         if not self.models_ready:
             self.log_output("warning", "⚠ Speech models are still loading. Please wait for readiness before starting.")
@@ -1147,74 +1637,81 @@ class TranscriptionControlWindow(QMainWindow):
             self.log_output("error", "❌ No speech-to-text models found. Please check models/ directory.")
             return
 
-        self.output_text.clear()
+        self.clear_output()
         self.log_output("status", f"🎙️ Capturing audio from: {target_window.title}")
         self.log_output("status", f"Source: {src_lang}")
         self.log_output("status", f"Audio input: {capture_mode}")
+        if capture_mode == "mic":
+            selected_text = self.mic_combo.currentText()
+            self.log_output("status", f"Microphone device: {selected_text}")
+            self.log_output("status", f"Voice focus: {'ON' if mic_voice_focus else 'OFF'}")
         self.log_output("status", f"Translation: {target_lang}")
         self.controller.realtime_stt.reset_recognizers()
 
         self.is_running = True
         self.is_stopping = False
+        self.last_stt_event_ts = None
+        self.bottom_state_label.setText("Listening")
+        self.bottom_alert_label.setText("OK")
         
-        # Stop window refresh timer to prevent auto-switching
         self.window_refresh_timer.stop()
         
-        self.start_btn.setText("   ⏹ STOP TRANSCRIPTION   ")
+        self.start_btn.setText("Stop")
         self.start_btn.setEnabled(True)
-        self.start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #dc2626;
-                color: white;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #b91c1c;
-            }
-            QPushButton:pressed {
-                background-color: #991b1b;
-            }
-        """)
+        self.start_btn.setObjectName("primaryButton")
+        self.start_btn.setStyleSheet(
+            "QPushButton#primaryButton { background-color: #dc2626; color: #ffffff; border: 1px solid #ef4444; }"
+            "QPushButton#primaryButton:hover { background-color: #ef4444; }"
+        )
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
         self.source_combo.setEnabled(False)
         self.capture_combo.setEnabled(False)
+        self.mic_combo.setEnabled(False)
+        self.refresh_mic_btn.setEnabled(False)
+        self.voice_focus_checkbox.setEnabled(False)
+        self.mode_combo.setEnabled(False)
+        self.theme_toggle.setEnabled(False)
+        self.settings_btn.setEnabled(False)
+        self.translation_enabled_checkbox.setEnabled(False)
         self.target_combo.setEnabled(False)
         self.window_combo.setEnabled(False)
         self.status_display.setText("● RECORDING FROM WINDOW...")
         self.status_display.setStyleSheet("color: #dc2626; font-weight: bold;")
         self.statusBar().showMessage(f"Recording from: {target_window.title}")
 
-        # Initialize overlay on main thread BEFORE starting worker
         try:
-            print(f"[DEBUG] Starting overlay initialization")
             self.controller.overlay_manager.initialize()
-            print(f"[DEBUG] Overlay initialized")
             target_rect = QRect(
                 target_window.x,
                 target_window.y,
                 target_window.width,
                 target_window.height
             )
-            print(f"[DEBUG] Setting target window rect: {target_rect}")
             self.controller.overlay_manager.set_target_window(target_rect)
-            print(f"[DEBUG] Showing overlay")
             self.controller.overlay_manager.show()
-            print(f"[DEBUG] Overlay shown")
         except Exception as e:
-            print(f"[DEBUG] Error during overlay setup: {e}")
             import traceback
             traceback.print_exc()
             self.log_output("warning", f"⚠ Overlay setup failed: {e}")
 
-        self.worker_thread = WindowAudioWorker(self.controller, src_lang, capture_mode, target_lang, target_window)
+        self.worker_thread = WindowAudioWorker(
+            self.controller,
+            src_lang,
+            capture_mode,
+            target_lang,
+            target_window,
+            preferred_mic_device_id=preferred_mic_device_id,
+            mic_voice_focus=mic_voice_focus,
+        )
         self.worker_thread.message_signal.connect(self.log_output)
         self.worker_thread.subtitle_signal.connect(self.on_subtitle_received)
         self.worker_thread.clear_subtitle_signal.connect(self.on_subtitle_clear)
+        self.worker_thread.audio_level_signal.connect(self.on_audio_level)
         self.worker_thread.error_signal.connect(self.on_error)
         self.worker_thread.finished_signal.connect(self.on_transcription_finished)
         self.worker_thread.start()
 
-        # Keep control window visible while transcription runs
         if self.tray_icon.isVisible():
             self.tray_icon.showMessage(
                 "Transcription Active",
@@ -1228,6 +1725,7 @@ class TranscriptionControlWindow(QMainWindow):
             return
 
         self.is_stopping = True
+        self.bottom_state_label.setText("Processing")
         self.log_output("status", "⏹ Stopping transcription...")
         self.start_btn.setEnabled(False)
         self.status_display.setText("◌ STOPPING...")
@@ -1242,85 +1740,69 @@ class TranscriptionControlWindow(QMainWindow):
         self.is_running = False
         self.is_stopping = False
         
-        # Close overlay
         try:
             if self.controller.overlay_manager:
                 self.controller.overlay_manager.close()
         except Exception:
             pass
         
-        # Restart window refresh timer
         self.window_refresh_timer.start(3000)
         
-        self.start_btn.setText("   ▶ START TRANSCRIPTION   ")
+        self.start_btn.setText("Start")
         self.start_btn.setEnabled(self.models_ready)
-        self.start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1d4ed8;
-                color: white;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background-color: #1e40af;
-            }
-            QPushButton:pressed {
-                background-color: #1e3a8a;
-            }
-        """)
+        self.start_btn.setStyleSheet("")
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
         self.source_combo.setEnabled(True)
         self.capture_combo.setEnabled(True)
+        self.on_capture_mode_changed(self.capture_combo.currentText())
+        self.mode_combo.setEnabled(True)
+        self.theme_toggle.setEnabled(True)
+        self.settings_btn.setEnabled(True)
+        self.translation_enabled_checkbox.setEnabled(True)
         self.target_combo.setEnabled(True)
         self.window_combo.setEnabled(True)
         self.status_display.setText("✓ Ready - Select a window to start")
         self.status_display.setStyleSheet("color: #10b981; font-weight: bold;")
         self.statusBar().showMessage("Ready")
         self.log_output("status", "✓ Transcription stopped")
+        self.bottom_state_label.setText("Idle")
+        self.bottom_latency_label.setText("Latency: -- ms")
+        self.audio_level_bar.setValue(0)
+        self.bottom_audio_label.setText("Input: 0%")
         self.worker_thread = None
         
-        # Update tray tooltip
         if self.tray_icon.isVisible():
-            self.tray_icon.setToolTip("Window Audio Transcriber - Ready")
+            self.tray_icon.setToolTip("Offline Caption Studio - Ready")
 
     def on_error(self, error_msg: str):
         self.log_output("error", f"❌ Error: {error_msg}")
+        self.bottom_alert_label.setText("Warning")
+
+    def on_audio_level(self, level: int):
+        safe_level = max(0, min(100, int(level)))
+        self.audio_level_bar.setValue(safe_level)
+        self.bottom_audio_label.setText(f"Input: {safe_level}%")
 
     def on_subtitle_received(self, text: str):
-        print(f"[DEBUG] on_subtitle_received called with: {text}")
+        if not self.overlay_enabled:
+            return
         try:
             if self.controller.overlay_manager and self.controller.overlay_manager.overlay:
-                print(f"[DEBUG] Updating overlay with text: {text}")
                 self.controller.overlay_manager.set_subtitle(text)
+                self.apply_overlay_position()
                 self.controller.overlay_manager.show()
-                print(f"[DEBUG] Overlay updated and shown")
-            else:
-                print(f"[DEBUG] Overlay manager or overlay is None")
-        except Exception as e:
-            print(f"[DEBUG] Error updating overlay: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            pass
 
     def on_subtitle_clear(self):
-        print(f"[DEBUG] on_subtitle_clear called (pause detected)")
         try:
             if self.controller.overlay_manager:
-                print(f"[DEBUG] Clearing overlay")
                 self.controller.overlay_manager.clear_subtitle()
-                print(f"[DEBUG] Overlay cleared")
-            else:
-                print(f"[DEBUG] Overlay manager is None")
-        except Exception as e:
-            print(f"[DEBUG] Error clearing overlay: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            pass
 
     def log_output(self, kind: str, text: str):
-        # Keep UI output concise: hide internal debug telemetry.
-        if kind == "debug":
-            return
-        if kind == "stt_partial":
-            return
-
         color_map = {
             "status": "#0084ff",
             "stt": "#10b981",
@@ -1330,9 +1812,53 @@ class TranscriptionControlWindow(QMainWindow):
             "error": "#ef4444",
         }
 
-        color = color_map.get(kind, "#2c3e50")
         timestamp = time.strftime("%H:%M:%S")
-        self.output_text.append(f"<span style='color: #7f8c8d'>[{timestamp}]</span> <span style='color: {color}'>{text}</span>")
+        timestamp_prefix = f"[{timestamp}] " if self.timestamp_checkbox.isChecked() else ""
+        color = color_map.get(kind, "#2c3e50")
+
+        if kind in {"status", "warning", "error"}:
+            self.output_text.append(
+                f"<span style='color: #7f8c8d'>{timestamp_prefix}</span> "
+                f"<span style='color: {color}'>{text}</span>"
+            )
+
+        if kind == "error":
+            self.bottom_alert_label.setText("Error")
+
+        if kind in {"stt", "stt_partial"}:
+            now = time.perf_counter()
+            if self.last_stt_event_ts is not None:
+                latency_ms = int((now - self.last_stt_event_ts) * 1000)
+                self.bottom_latency_label.setText(f"Latency: {latency_ms} ms")
+            self.last_stt_event_ts = now
+
+            clean_text = text.strip()
+            is_bracketed = clean_text.startswith("[") and "]" in clean_text
+            lang_tag = ""
+            body = clean_text
+            if is_bracketed:
+                split_at = clean_text.find("]")
+                lang_tag = clean_text[1:split_at].strip().lower()
+                body = clean_text[split_at + 1 :].strip()
+
+            target_map = {
+                "English": "en",
+                "Hindi": "hi",
+                "Auto Opposite": "other",
+                "None": "none",
+            }
+            selected_target = target_map.get(self.target_combo.currentText(), "none")
+            send_to_translation = False
+            if self.translation_enabled_checkbox.isChecked() and selected_target in {"en", "hi"}:
+                send_to_translation = lang_tag == selected_target
+
+            pane = self.translation_text if send_to_translation else self.transcription_text
+            text_color = "#94a3b8" if kind == "stt_partial" else "#ffffff"
+            if not self.is_dark_mode:
+                text_color = "#64748b" if kind == "stt_partial" else "#0f172a"
+
+            display = f"{timestamp_prefix}{clean_text if clean_text else body}"
+            pane.append(f"<span style='color: {text_color}'>{display}</span>")
 
     def closeEvent(self, event):
         if self.is_running and self.worker_thread:

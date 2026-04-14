@@ -24,14 +24,13 @@ class OverlayConfig:
     padding: int = 10
 
     def __post_init__(self) -> None:
-        # Ensure font_size is always valid (> 0)
         if self.font_size <= 0:
             self.font_size = 16
         
         if self.text_color is None:
-            self.text_color = QColor(255, 255, 255)  # White
+            self.text_color = QColor(255, 255, 255)
         if self.background_color is None:
-            self.background_color = QColor(0, 0, 0)  # Black
+            self.background_color = QColor(0, 0, 0)
 
 
 class SubtitleOverlay(QWidget):
@@ -52,7 +51,6 @@ class SubtitleOverlay(QWidget):
         self._load_preferences()
 
     def _setup_ui(self) -> None:
-        # Make window frameless and transparent
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -60,17 +58,13 @@ class SubtitleOverlay(QWidget):
             | Qt.WindowType.WindowDoesNotAcceptFocus
         )
 
-        # Set transparency
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowOpacity(self.config.opacity)
 
-        # Default size and position (will be overridden by preferences)
         self.setGeometry(100, 100, 800, 150)
         
-        # Enable mouse tracking for resize cursor
         self.setMouseTracking(True)
 
-        # Overlay close control
         self.close_btn = QPushButton("X", self)
         self.close_btn.setFixedSize(26, 22)
         self.close_btn.setStyleSheet(
@@ -149,10 +143,8 @@ class SubtitleOverlay(QWidget):
             pass
 
     def set_text(self, text: str) -> None:
-        print(f"[DEBUG] SubtitleOverlay.set_text called with: {text}")
         self.current_text = text
         self.update()
-        print(f"[DEBUG] SubtitleOverlay.set_text done")
 
     def set_target_window_rect(self, rect: QRect) -> None:
         self.target_window_rect = rect
@@ -198,10 +190,8 @@ class SubtitleOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        # Draw semi-transparent background
         painter.fillRect(self.rect(), self.config.background_color)
 
-        # Draw text - ensure valid font size
         font_size = max(self.config.font_size, 8) if self.config.font_size > 0 else 16
         font = QFont(self.config.font_family, font_size)
         painter.setFont(font)
@@ -215,7 +205,7 @@ class SubtitleOverlay(QWidget):
         )
 
         text_option = QTextOption()
-        text_option.setWrapMode(QTextOption.WrapMode.NoWrap)
+        text_option.setWrapMode(QTextOption.WrapMode.WordWrap)
         text_option.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         painter.drawText(text_rect, self.current_text, text_option)
@@ -233,13 +223,12 @@ class SubtitleOverlay(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         if self.resize_edge:
-            # Handle resizing
             delta = event.globalPosition().toPoint() - self.resize_start_pos
             geom = QRect(self.resize_start_geom)
             
             if 'left' in self.resize_edge:
                 new_width = geom.width() - delta.x()
-                if new_width >= 200:  # Minimum width
+                if new_width >= 200:
                     geom.setLeft(self.resize_start_geom.left() + delta.x())
             if 'right' in self.resize_edge:
                 new_width = geom.width() + delta.x()
@@ -247,7 +236,7 @@ class SubtitleOverlay(QWidget):
                     geom.setWidth(new_width)
             if 'top' in self.resize_edge:
                 new_height = geom.height() - delta.y()
-                if new_height >= 50:  # Minimum height
+                if new_height >= 50:
                     geom.setTop(self.resize_start_geom.top() + delta.y())
             if 'bottom' in self.resize_edge:
                 new_height = geom.height() + delta.y()
@@ -256,10 +245,8 @@ class SubtitleOverlay(QWidget):
             
             self.setGeometry(geom)
         elif hasattr(self, 'drag_position') and self.drag_position:
-            # Handle dragging
             self.move(event.globalPosition().toPoint() - self.drag_position)
         else:
-            # Update cursor when hovering
             edge = self._get_resize_edge(event.pos())
             self._update_cursor(edge)
         
@@ -294,49 +281,33 @@ class OverlayManager:
         self.update_timer: Optional[QTimer] = None
 
     def initialize(self) -> None:
-        print(f"[DEBUG] OverlayManager.initialize called")
         if self.app is None:
-            # Create or get existing QApplication
             app = QApplication.instance()
             if app is None:
-                print(f"[DEBUG] Creating new QApplication")
                 self.app = QApplication(sys.argv)
             else:
-                print(f"[DEBUG] Using existing QApplication")
                 self.app = app
 
         if self.overlay is None:
-            print(f"[DEBUG] Creating SubtitleOverlay")
             self.overlay = SubtitleOverlay(self.config)
             self.overlay.show_overlay()
-            print(f"[DEBUG] SubtitleOverlay created and shown")
-        else:
-            print(f"[DEBUG] Overlay already exists")
 
     def set_subtitle(self, text: str) -> None:
-        print(f"[DEBUG] OverlayManager.set_subtitle called with: {text}")
         if self.overlay is None:
             self.initialize()
 
         if self.overlay:
-            print(f"[DEBUG] Calling overlay.set_text")
             self.overlay.set_text(text)
-        else:
-            print(f"[DEBUG] Overlay is None in set_subtitle")
 
     def set_target_window(self, rect: QRect) -> None:
         if self.overlay:
             self.overlay.set_target_window_rect(rect)
 
     def show(self) -> None:
-        print(f"[DEBUG] OverlayManager.show called")
         if self.overlay is None:
             self.initialize()
         if self.overlay:
-            print(f"[DEBUG] Calling overlay.show_overlay")
             self.overlay.show_overlay()
-        else:
-            print(f"[DEBUG] Overlay is None in show")
 
     def hide(self) -> None:
         if self.overlay:
@@ -350,9 +321,7 @@ class OverlayManager:
     def clear_subtitle(self) -> None:
         if self.overlay is None:
             return
-        print(f"[DEBUG] OverlayManager.clear_subtitle called")
         self.overlay.set_text("")
-        print(f"[DEBUG] Cleared subtitle")
 
     def process_events(self) -> None:
         if self.app:

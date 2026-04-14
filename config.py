@@ -74,6 +74,7 @@ class AppConfig:
     app_name: str = APP_NAME
     app_data_dir: Path = APP_DATA_DIR
     log_dir: Path = LOG_DIR
+    offline_mode: bool = True
 
     vosk_model_en: Path = _pick_first_vosk_dir(
         patterns=["vosk-model-en*", "vosk-model-small-en*"],

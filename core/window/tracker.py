@@ -154,7 +154,6 @@ class MacWindowTracker(WindowTrackerBackend):
             if not windows:
                 return None
 
-            # The first window in the list is typically the active one
             window = windows[0]
             title = window.get(self.kCGWindowName, "Unknown")
             bounds = window.get(self.kCGWindowBounds, {})
@@ -216,7 +215,6 @@ class LinuxWindowTracker(WindowTrackerBackend):
     def get_active_window(self) -> Optional[WindowInfo]:
         try:
             root = self.display.screen().root
-            # Get active window from _NET_ACTIVE_WINDOW property
             net_active_window = root.get_full_property(
                 self.display.intern_atom("_NET_ACTIVE_WINDOW"), 0
             )
